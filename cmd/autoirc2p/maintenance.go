@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/gosuda/AutoIRC2P/internal/config"
 	"github.com/gosuda/AutoIRC2P/internal/store"
+	"github.com/rs/zerolog/log"
 )
 
 func execute(args []string) error {
@@ -78,7 +78,7 @@ func maintainCommand(command string, args []string) error {
 		if err := store.Backup(ctx, filepath.Join(*dataDir, "chat.sqlite"), filepath.Join(*dataDir, "application.key"), *target); err != nil {
 			return err
 		}
-		slog.Info("backup created", "directory", *target)
+		log.Info().Str("directory", *target).Msg("backup created")
 		return nil
 	}
 	if *source == "" {
@@ -87,7 +87,7 @@ func maintainCommand(command string, args []string) error {
 	if err := store.Restore(ctx, *source, *dataDir); err != nil {
 		return err
 	}
-	slog.Info("backup restored", "directory", *dataDir)
+	log.Info().Str("directory", *dataDir).Msg("backup restored")
 	return nil
 }
 
@@ -100,10 +100,12 @@ func runRetention(ctx context.Context, q *store.Queries, cfg config.Retention) {
 		result, err := q.Prune(pruneCtx, time.Now(), policy)
 		cancel()
 		if err != nil && ctx.Err() == nil {
-			slog.Warn("retention incomplete", "error", err)
+			log.Warn().Err(err).Msg("retention incomplete")
 		}
 		if result.MessagesDeleted+result.TranslationsDeleted+result.SendPayloadsPurged > 0 {
-			slog.Info("retention completed", "messages", result.MessagesDeleted, "translations", result.TranslationsDeleted, "send_payloads", result.SendPayloadsPurged)
+			event := log.Info().Int64("messages", result.MessagesDeleted)
+			event.Int64("translations", result.TranslationsDeleted).Int64("send_payloads", result.SendPayloadsPurged)
+			event.Msg("retention completed")
 		}
 		select {
 		case <-ctx.Done():

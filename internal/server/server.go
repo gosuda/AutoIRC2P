@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,6 +16,7 @@ import (
 	"github.com/gosuda/AutoIRC2P/internal/store"
 	"github.com/gosuda/AutoIRC2P/internal/translate"
 	"github.com/julienschmidt/httprouter"
+	"github.com/rs/zerolog/log"
 )
 
 type Bridge interface {
@@ -139,7 +139,7 @@ func (s *Server) Run(ctx context.Context) {
 		recoveryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.q.RecoverSends(recoveryCtx); err != nil {
-			slog.Error("recover interrupted sends", "error", err)
+			log.Error().Err(err).Msg("recover interrupted sends")
 		}
 		s.mu.Lock()
 		for sub := range s.subscribers {
@@ -168,7 +168,7 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 			return
 		}
 		if err := s.q.RegisterIRC(ctx, event.AccountID); err != nil {
-			slog.Error("persist IRC registration", "error", err)
+			log.Error().Err(err).Msg("persist IRC registration")
 		}
 		return
 	case "status":
@@ -234,7 +234,7 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 	})
 	if err != nil {
 		s.outgoingMu.Unlock()
-		slog.Error("persist IRC message", "error", err)
+		log.Error().Err(err).Msg("persist IRC message")
 		return
 	}
 	if confirmed != nil {
@@ -244,7 +244,7 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 	s.refreshRooms(ctx, row.Room, 0)
 	languages, err := s.q.RoomLanguages(ctx, row.Room)
 	if err != nil {
-		slog.Error("read room language", "error", err)
+		log.Error().Err(err).Msg("read room language")
 	}
 	roomLanguage := translate.RoomLanguage(languages)
 	for _, lang := range []string{"en", "ko", "original"} {
@@ -372,7 +372,7 @@ func language(r *http.Request) string {
 func (s *Server) Handler() http.Handler {
 	scripts, err := scriptPolicy(s.cfg.WebDir)
 	if err != nil {
-		slog.Error("read frontend script policy", "error", err)
+		log.Error().Err(err).Msg("read frontend script policy")
 		scripts = "'self'"
 	}
 	router := httprouter.New()
@@ -418,7 +418,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		slog.Debug("HTTP response closed", "error", err)
+		log.Debug().Err(err).Msg("HTTP response closed")
 	}
 }
 func writeError(w http.ResponseWriter, status int, message string) {

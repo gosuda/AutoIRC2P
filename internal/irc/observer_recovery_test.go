@@ -183,7 +183,7 @@ func TestObserverRetriesNicknameRejectionWithoutStopping(t *testing.T) {
 		}
 		first := receiveRecoveryAttempt(t, attempts, observer)
 		writeRecoveryLine(t, first, ":irc.example.i2p 433 * observer :Nickname in use")
-		second := retryRecoveryAttempt(t, attempts, observer, 5*time.Second)
+		second := retryRecoveryAttempt(t, attempts, observer, time.Second)
 		joinRecoveryRoom(t, manager, second, observer)
 		if got := events.statusCount("stopped"); got != 0 {
 			t.Fatalf("observer emitted %d stopped events during nickname recovery", got)
@@ -194,7 +194,7 @@ func TestObserverRetriesNicknameRejectionWithoutStopping(t *testing.T) {
 	})
 }
 
-func TestObserverBackoffResetsOnlyAfterValidatedWelcome(t *testing.T) {
+func TestObserverRetriesEverySecondBeforeAndAfterWelcome(t *testing.T) {
 	observer := leaseAccount(t, 0, "observer")
 	synctest.Test(t, func(t *testing.T) {
 		manager, attempts, events := newRecoveryManager(t)
@@ -203,16 +203,16 @@ func TestObserverBackoffResetsOnlyAfterValidatedWelcome(t *testing.T) {
 		}
 		first := receiveRecoveryAttempt(t, attempts, observer)
 		_ = first.peer.Close()
-		second := retryRecoveryAttempt(t, attempts, observer, 5*time.Second)
+		second := retryRecoveryAttempt(t, attempts, observer, time.Second)
 		writeRecoveryLine(t, second, ":irc.example.i2p 001 someoneelse :Wrong recipient")
 		writeRecoveryLine(t, second, ":mallory!u@host 001 observer :Not a server")
 		_ = second.peer.Close()
-		third := retryRecoveryAttempt(t, attempts, observer, 10*time.Second)
+		third := retryRecoveryAttempt(t, attempts, observer, time.Second)
 		joinRecoveryRoom(t, manager, third, observer)
 		_ = third.peer.Close()
-		fourth := retryRecoveryAttempt(t, attempts, observer, 5*time.Second)
+		fourth := retryRecoveryAttempt(t, attempts, observer, time.Second)
 		_ = fourth.peer.Close()
-		fifth := retryRecoveryAttempt(t, attempts, observer, 10*time.Second)
+		fifth := retryRecoveryAttempt(t, attempts, observer, time.Second)
 		joinRecoveryRoom(t, manager, fifth, observer)
 		if got := events.statusCount("stopped"); got != 0 {
 			t.Fatalf("observer emitted %d stopped events during reconnects", got)
@@ -266,7 +266,7 @@ func TestObserverShutdownDuringBackoffClosesResources(t *testing.T) {
 		if got := events.statusCount("stopped"); got != 0 {
 			t.Fatalf("observer stopped before shutdown during recoverable rejection: %d events", got)
 		}
-		<-time.After(4 * time.Second)
+		<-time.After(500 * time.Millisecond)
 		if err := manager.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -322,5 +322,65 @@ func TestRegisteredAccountNicknameRejectionRemainsTerminal(t *testing.T) {
 		default:
 			t.Fatal("terminal nickname rejection retained its endpoint")
 		}
+	})
+}
+
+func TestObserverKeepsReceivingWithoutUserLeases(t *testing.T) {
+	observer := leaseAccount(t, 0, "observer")
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, events := newRecoveryManager(t)
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		connection := receiveRecoveryAttempt(t, attempts, observer)
+		joinRecoveryRoom(t, manager, connection, observer)
+		for range 45 {
+			if err := connection.peer.SetDeadline(time.Now().Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			before := time.Now()
+			readRecoveryLine(t, connection, "PING :autoirc2p\r\n")
+			if elapsed := time.Since(before); elapsed != 30*time.Second {
+				t.Fatalf("keepalive interval = %s, want 30s", elapsed)
+			}
+			writeRecoveryLine(t, connection, ":irc.example.i2p PONG irc.example.i2p :autoirc2p")
+		}
+		writeRecoveryLine(t, connection, ":alice!u@host PRIVMSG #first :still receiving")
+		synctest.Wait()
+		if got := manager.RoomState(0, "#first"); got != RoomReady {
+			t.Fatalf("observer room after idle period = %s, want ready", got)
+		}
+		events.mu.Lock()
+		defer events.mu.Unlock()
+		for _, event := range events.events {
+			if event.Kind == "message" && event.Room == "#first" && event.Text == "still receiving" {
+				return
+			}
+		}
+		t.Fatal("observer did not receive chat after 22 minutes without user leases")
+	})
+}
+
+func TestObserverReconnectsWhenServerStopsResponding(t *testing.T) {
+	observer := leaseAccount(t, 0, "observer")
+	observer.Password = ""
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		manager.cfg.IdleTimeout = 75 * time.Second
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		connection := receiveRecoveryAttempt(t, attempts, observer)
+		if err := connection.peer.SetDeadline(time.Now().Add(2 * time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		writeRecoveryLine(t, connection, ":irc.example.i2p 001 observer :Welcome")
+		readRecoveryLine(t, connection, "JOIN #first\r\n")
+		readRecoveryLine(t, connection, "PING :autoirc2p\r\n")
+		readRecoveryLine(t, connection, "PING :autoirc2p\r\n")
+		if line, err := connection.reader.ReadString('\n'); !errors.Is(err, io.EOF) {
+			t.Fatalf("unresponsive server connection = %q, %v; want EOF", line, err)
+		}
+		retryRecoveryAttempt(t, attempts, observer, time.Second)
 	})
 }

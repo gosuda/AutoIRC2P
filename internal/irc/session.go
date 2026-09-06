@@ -10,9 +10,14 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/rs/zerolog/log"
 )
 
-const channelJoinInterval = 2 * time.Second
+const (
+	channelJoinInterval = 2 * time.Second
+	keepaliveInterval   = 30 * time.Second
+)
 
 func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection) (result error) {
 	joinCtx, cancelJoins := context.WithCancel(state.ctx)
@@ -77,6 +82,10 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			}
 			continue
 		}
+		if msg.command == "PONG" && serverSource(msg.prefix) {
+			log.Info().Int64("account_id", state.account.ID).Msg("IRC keepalive PONG received")
+			continue
+		}
 		if msg.command == "ERROR" {
 			return net.ErrClosed
 		}
@@ -89,13 +98,15 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 					continue
 				}
 				welcome = true
-				conn.registered = true
 				service.server = msg.prefix
 				var err error
 				serviceDeadline, err = m.joinAndDiscoverServices(joinCtx, conn, state.account, &joins)
 				if err != nil {
 					return err
 				}
+				joins.Go(func() {
+					m.keepalive(joinCtx, state.account.ID, conn, min(keepaliveInterval, max(time.Nanosecond, idleTimeout/2)), pongTimeout)
+				})
 			case "403", "405", "471", "473", "474", "475", "477", "489":
 				if len(msg.params) > 1 {
 					m.setRoomState(state, msg.params[1], RoomUnavailable)
@@ -171,6 +182,28 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			continue
 		}
 		m.onEvent(Event{AccountID: 0, Room: room, Nick: nick, Text: text, Service: isService, Kind: "message"})
+	}
+}
+
+func (m *Manager) keepalive(ctx context.Context, accountID int64, conn *wireConnection, interval, timeout time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := conn.writeWithTimeout(ctx, "PING :autoirc2p", timeout); err != nil {
+				err = errors.Join(err, conn.Close())
+				if ctx.Err() == nil {
+					event := log.Warn().Int64("account_id", accountID)
+					event.Err(err).Msg("IRC keepalive write failed")
+				}
+				return
+			}
+			event := log.Info().Int64("account_id", accountID)
+			event.Dur("interval_ms", interval).Msg("IRC keepalive PING sent")
+		}
 	}
 }
 

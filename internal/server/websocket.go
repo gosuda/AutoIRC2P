@@ -3,12 +3,12 @@ package server
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/gosuda/AutoIRC2P/internal/irc"
+	"github.com/rs/zerolog/log"
 )
 
 func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +90,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	sub.cursorMu.Unlock()
 	if roomErr != nil {
 		if err := conn.Close(); err != nil {
-			slog.Debug("websocket closed", "error", err)
+			log.Debug().Err(err).Msg("websocket closed")
 		}
 		return
 	}
@@ -118,7 +118,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 			if err := s.markRead(ctx, sub, request.Room, request.MessageID); err != nil {
 				if errors.Is(err, errCursorRateLimited) {
 					if err := conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "cursor rate exceeded"), time.Now().Add(10*time.Second)); err != nil {
-						slog.Debug("websocket policy close", "error", err)
+						log.Debug().Err(err).Msg("websocket policy close")
 					}
 				}
 				return
@@ -129,7 +129,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		sub.close()
 		if err := conn.Close(); err != nil {
-			slog.Debug("websocket closed", "error", err)
+			log.Debug().Err(err).Msg("websocket closed")
 		}
 		<-readDone
 	}()

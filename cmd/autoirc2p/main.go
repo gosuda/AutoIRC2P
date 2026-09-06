@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -19,12 +18,17 @@ import (
 	"github.com/gosuda/AutoIRC2P/internal/server"
 	"github.com/gosuda/AutoIRC2P/internal/store"
 	"github.com/gosuda/AutoIRC2P/internal/translate"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"gosuda.org/portalite"
 )
 
 func main() {
+	logger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}).Level(zerolog.InfoLevel)
+	logContext := logger.With().Timestamp()
+	log.Logger = logContext.Logger()
 	if err := execute(os.Args[1:]); err != nil {
-		slog.Error("command failed", "error", err)
+		log.Error().Err(err).Msg("command failed")
 		os.Exit(1)
 	}
 }
@@ -86,7 +90,8 @@ func run() (err error) {
 	httpServer := &http.Server{Addr: cfg.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.HTTPBodyTimeout, WriteTimeout: cfg.HTTPWriteTimeout, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16384}
 	serverError := make(chan error, 1)
 	workers.Go(func() {
-		slog.Info("HTTP listening", "address", listener.Addr().String(), "portalite", cfg.Portalite)
+		event := log.Info().Str("address", listener.Addr().String())
+		event.Bool("portalite", cfg.Portalite).Msg("HTTP listening")
 		serverError <- httpServer.Serve(listener)
 	})
 	defer func() {

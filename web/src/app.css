@@ -75,7 +75,6 @@ h1 { font-family: var(--font-display); font-weight: 500; font-size: var(--text-x
 .translation-status.pending { color: var(--color-warning); }
 .translation-status.failed { color: var(--color-error); }
 .service-message .message-nick { color: var(--color-secondary); }
-.service-original { margin-top: var(--space-sm); }
 .empty-state, .workspace-loading { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: var(--space-md); min-height: 100%; padding: var(--space-xl) 0; max-width: 40rem; }
 .workspace-loading { flex: 1; min-height: 100px; padding: var(--space-xl); }
 .empty-mark { font-family: var(--font-display); font-size: 3rem; font-weight: 400; line-height: 1; color: var(--color-strong-rule); }
@@ -193,6 +192,15 @@ details.network-panel { display: block; font-size: var(--text-xs); }
 .message-language { min-width: 0; overflow-wrap: anywhere; }
 .message time { font-family: var(--font-body); }
 .sent-check { flex: none; width: 18px; height: 18px; align-self: center; color: var(--color-accent); }
+.message-details-trigger { min-height: 32px; padding: 0; border: 0; background: var(--color-transparent); text-align: start; }
+.message-details-trigger:hover { color: var(--color-ink); background: var(--color-transparent); }
+.message-details-trigger:active { color: var(--color-secondary); }
+.message-metadata { position: fixed; inset: auto; margin: 0; width: min(22rem, calc(100vw - 1rem)); max-height: calc(100dvh - 1rem); overflow: auto; padding: var(--space-md) var(--space-lg); border: var(--rule-width) solid var(--color-strong-rule); border-radius: var(--radius-md); background: var(--color-panel); color: var(--color-secondary); font-size: var(--text-sm); }
+.message-metadata header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); }
+.message-metadata header strong { font-size: var(--text-sm); font-weight: 500; }
+.message-metadata header button { min-height: 44px; padding-inline: var(--space-sm); font-size: var(--text-xs); }
+.message-metadata time { color: var(--color-muted); font-size: var(--text-xs); }
+.message-metadata .message-language { margin-bottom: var(--space-xs); }
 .outgoing-status { margin-top: var(--space-sm); font-size: var(--text-xs); color: var(--color-muted); }
 .outgoing-error { border-color: var(--color-error); }
 .outgoing-error .outgoing-status { color: var(--color-error); }

@@ -6,6 +6,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/pemistahl/lingua-go v1.4.0
+	github.com/rs/zerolog v1.35.1
 	golang.org/x/sys v0.47.0
 	gosuda.org/ivnp v0.0.0-20260906113531-95d76218a2aa
 	gosuda.org/portalite v0.0.0-20260826135640-1f955935677b
@@ -18,6 +19,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gosuda/keyless_tls v0.0.2-0.20260507061030-5128be6b5008 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect

@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/gosuda/AutoIRC2P/internal/irc"
 	"github.com/gosuda/AutoIRC2P/internal/store"
 	"github.com/gosuda/AutoIRC2P/internal/translate"
+	"github.com/rs/zerolog/log"
 )
 
 type Room struct {
@@ -154,7 +154,7 @@ func (s *Server) refreshRooms(ctx context.Context, name string, userID int64) {
 		for _, roomName := range names {
 			room, err := s.roomMetadata(ctx, sub.userID, roomName, sub.cursors)
 			if err != nil {
-				slog.Error("refresh room metadata", "error", err)
+				log.Error().Err(err).Msg("refresh room metadata")
 				sub.close()
 				break
 			}

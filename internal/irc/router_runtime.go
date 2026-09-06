@@ -4,9 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"time"
 
+	"github.com/rs/zerolog/log"
 	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/client"
 )
@@ -132,7 +131,6 @@ func (m *Manager) runRouter() {
 		closeRuntime(runtimeFailure)
 	}()
 
-	delay := 5 * time.Second
 	for m.ctx.Err() == nil {
 		var err error
 		if runtime == nil {
@@ -169,9 +167,7 @@ func (m *Manager) runRouter() {
 				close(m.ready)
 			}
 			m.mu.Unlock()
-			slog.Info("Embedded I2P router started")
 			m.status(0, "connecting", "I2P router started; building anonymous tunnels")
-			delay = 5 * time.Second
 			select {
 			case <-m.ctx.Done():
 				return
@@ -184,12 +180,12 @@ func (m *Manager) runRouter() {
 			return
 		}
 		err = errors.Join(err, closeRuntime(err))
-		slog.Warn("Embedded I2P router unavailable", "error", err, "retry_delay", delay)
-		m.status(0, "connecting", "Embedded I2P router unavailable; retrying in "+delay.String())
-		if !pause(m.ctx, delay) {
+		event := log.Warn().Err(err)
+		event.Dur("retry_in_ms", reconnectDelay).Msg("Embedded I2P router unavailable")
+		m.onEvent(Event{AccountID: 0, State: "connecting", Text: "Embedded I2P router unavailable; retrying in " + reconnectDelay.String(), Service: true, Kind: "status"})
+		if !pause(m.ctx, reconnectDelay) {
 			return
 		}
-		delay = min(delay*2, 2*time.Minute)
 	}
 }
 

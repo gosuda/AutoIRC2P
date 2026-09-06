@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"log/slog"
 	"net/http"
 	"regexp"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/gosuda/AutoIRC2P/internal/store"
 	"github.com/gosuda/AutoIRC2P/internal/translate"
 	"github.com/julienschmidt/httprouter"
+	"github.com/rs/zerolog/log"
 )
 
 type Outgoing struct {
@@ -41,7 +41,7 @@ func (s *Server) expireSends(ctx context.Context) {
 	now := time.Now().UnixMilli()
 	rows, err := s.q.ExpireEchoes(ctx, store.ExpireEchoesParams{UpdatedAt: now, ExpiresAt: now})
 	if err != nil {
-		slog.Error("expire outgoing echoes", "error", err)
+		log.Error().Err(err).Msg("expire outgoing echoes")
 		return
 	}
 	for _, row := range rows {
@@ -246,7 +246,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		}
 		s.outgoingMu.Unlock()
 		if finishErr != nil {
-			slog.Error("persist outgoing state", "error", finishErr)
+			log.Error().Err(finishErr).Msg("persist outgoing state")
 			sendError(w, 500, "send_unavailable", nil)
 			return
 		}

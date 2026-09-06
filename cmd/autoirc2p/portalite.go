@@ -5,13 +5,13 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/gosuda/AutoIRC2P/internal/config"
+	"github.com/rs/zerolog/log"
 	"gosuda.org/portalite"
 )
 
@@ -47,9 +47,11 @@ func logPortaliteUpdates(exposure *portalite.Exposure) {
 	for status := range exposure.Updates() {
 		switch status.State {
 		case portalite.RelayReady:
-			slog.Info("Portalite URL ready", "url", status.PublicURL, "relay", status.RelayURL)
+			event := log.Info().Str("url", status.PublicURL)
+			event.Str("relay", status.RelayURL).Msg("Portalite URL ready")
 		case portalite.RelayFailed:
-			slog.Error("Portalite relay failed", "relay", status.RelayURL, "error", status.Err)
+			event := log.Error().Str("relay", status.RelayURL)
+			event.Err(status.Err).Msg("Portalite relay failed")
 		}
 	}
 }

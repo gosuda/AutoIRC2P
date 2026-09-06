@@ -152,7 +152,11 @@ export function subscribeRoom(options: {
   let duringHistory = new Map<number | string, Message>();
 
   function publish() {
-    options.onMessages([...messages.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id - b.id));
+    const visible = [...messages.values()].filter((message) => {
+      const nick = message.nick.toLowerCase();
+      return nick !== 'nickserv' && nick !== 'chanserv';
+    });
+    options.onMessages(visible.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id - b.id));
   }
 
   function mergeMessage(previous: Message | undefined, incoming: Message): Message {

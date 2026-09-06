@@ -260,17 +260,21 @@ func TestI2PKeepaliveToleratesDelayedPingAndPong(t *testing.T) {
 				if _, err := io.WriteString(server, "PING :before-welcome\r\n"); err != nil {
 					t.Fatal(err)
 				}
+				<-time.After(tc.writeDelay)
 				if line, err := reader.ReadString('\n'); err != nil || line != "PONG :before-welcome\r\n" {
 					t.Fatalf("registration PONG = %q, %v", line, err)
 				}
 				if _, err := io.WriteString(server, ":irc.example.i2p 001 reader :Welcome\r\n"); err != nil {
 					t.Fatal(err)
 				}
-				<-time.After(tc.silence)
+				for range int(tc.silence / (30 * time.Second)) {
+					if line, err := reader.ReadString('\n'); err != nil || line != "PING :autoirc2p\r\n" {
+						t.Fatalf("client keepalive = %q, %v", line, err)
+					}
+				}
 				if _, err := io.WriteString(server, "PING :slow-route\r\n"); err != nil {
 					t.Fatal(err)
 				}
-				<-time.After(tc.writeDelay)
 				if line, err := reader.ReadString('\n'); err != nil || line != "PONG :slow-route\r\n" {
 					t.Fatalf("delayed PONG = %q, %v", line, err)
 				}

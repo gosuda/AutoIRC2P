@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/foundation"
 )
@@ -27,6 +28,8 @@ var (
 	errNickUnavailable  = errors.New("nickname is unavailable; choose another nickname or recover it through the IRC network")
 	errNoReadiness      = errors.New("IVNP destination does not support readiness")
 )
+
+const reconnectDelay = time.Second
 
 type Account struct {
 	ID         int64
@@ -51,7 +54,7 @@ type Config struct {
 	ConfigPath string
 	Server     string
 	Rooms      []string
-	// Zero selects 20 minutes idle and 2 minutes for PONG writes.
+	// Zero selects 20 minutes idle and 2 minutes for PING/PONG writes.
 	IdleTimeout, PongTimeout time.Duration
 	// Zero selects 16 registered accounts and a 2-minute last-release grace.
 	MaxAccounts      int
@@ -99,10 +102,9 @@ type accountConnection struct {
 
 type wireConnection struct {
 	net.Conn
-	writeMu    sync.Mutex
-	closeOnce  sync.Once
-	closeErr   error
-	registered bool
+	writeMu   sync.Mutex
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func New(cfg Config, onEvent func(Event)) (*Manager, error) {
@@ -349,7 +351,8 @@ func (m *Manager) finishAccount(state *accountConnection, endpoint ivnp.Destinat
 	m.mu.Unlock()
 	if endpoint != nil {
 		if err := endpoint.Close(); err != nil {
-			slog.Warn("I2P endpoint cleanup failed", "account_id", state.account.ID, "error", err)
+			event := log.Warn().Int64("account_id", state.account.ID)
+			event.Err(err).Msg("I2P endpoint cleanup failed")
 		}
 	}
 	state.local.ReleaseSensitive()
@@ -372,16 +375,17 @@ func (m *Manager) finishAccount(state *accountConnection, endpoint ivnp.Destinat
 func (m *Manager) runAccount(state *accountConnection) {
 	var endpoint ivnp.DestinationEndpoint
 	defer func() { m.finishAccount(state, endpoint) }()
+	m.status(state.account.ID, "connecting", "Waiting for embedded I2P router")
 	select {
 	case <-state.ctx.Done():
 		return
 	case <-m.ready:
 	}
-	delay := 5 * time.Second
 	for state.ctx.Err() == nil {
 		var err error
 		stage := "destination creation"
 		if endpoint == nil {
+			m.status(state.account.ID, "connecting", "Creating I2P destination")
 			endpoint, err = m.createDestination(state.ctx, ivnp.DestinationSpec{Local: state.local})
 		}
 		if err == nil {
@@ -404,11 +408,7 @@ func (m *Manager) runAccount(state *accountConnection) {
 			dialCancel()
 			if err == nil {
 				stage = "IRC session"
-				wire := &wireConnection{Conn: conn}
-				err = m.serveConnection(state, wire)
-				if wire.registered {
-					delay = 5 * time.Second
-				}
+				err = m.serveConnection(state, &wireConnection{Conn: conn})
 			}
 		}
 		if state.ctx.Err() != nil {
@@ -423,16 +423,19 @@ func (m *Manager) runAccount(state *accountConnection) {
 		replaceEndpoint := errors.Is(err, errNoReadiness) || (stage != "IRC session" && closedEndpoint)
 		if endpoint != nil && replaceEndpoint {
 			if closeErr := endpoint.Close(); closeErr != nil {
-				slog.Warn("I2P endpoint cleanup failed", "account_id", state.account.ID, "error", closeErr)
+				event := log.Warn().Int64("account_id", state.account.ID)
+				event.Err(closeErr).Msg("I2P endpoint cleanup failed")
 			}
 			endpoint = nil
 		}
-		slog.Warn("IRC connection attempt failed", "account_id", state.account.ID, "stage", stage, "error", err, "retry_in", delay)
-		m.status(state.account.ID, "disconnected", fmt.Sprintf("IRC connection failed during %s: %v; retrying in %s without replaying messages", stage, err, delay))
-		if !pause(state.ctx, delay) {
+		event := log.Warn().Int64("account_id", state.account.ID)
+		event.Str("server", m.cfg.Server).Str("stage", stage)
+		event.Err(err).Dur("retry_in_ms", reconnectDelay)
+		event.Msg("IRC connection attempt failed")
+		m.onEvent(Event{AccountID: state.account.ID, State: "disconnected", Text: fmt.Sprintf("IRC connection failed during %s: %v; retrying in %s without replaying messages", stage, err, reconnectDelay), Service: true, Kind: "status"})
+		if !pause(state.ctx, reconnectDelay) {
 			return
 		}
-		delay = min(delay*2, 2*time.Minute)
 	}
 }
 
@@ -482,6 +485,13 @@ func (m *Manager) Send(ctx context.Context, accountID int64, room, text string) 
 }
 
 func (m *Manager) status(accountID int64, state, text string) {
+	level := zerolog.InfoLevel
+	if state == "error" {
+		level = zerolog.ErrorLevel
+	}
+	event := log.WithLevel(level).Int64("account_id", accountID)
+	event.Str("server", m.cfg.Server).Str("state", state)
+	event.Msg(text)
 	m.onEvent(Event{AccountID: accountID, State: state, Text: text, Service: true, Kind: "status"})
 }
 

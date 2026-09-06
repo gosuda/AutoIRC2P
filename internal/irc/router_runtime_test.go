@@ -153,7 +153,7 @@ func TestRouterStartupRetriesAfterClosingAndDrainingPreviousRuntime(t *testing.T
 			t.Fatal("observer created an endpoint before successful startup")
 		default:
 		}
-		<-time.After(5 * time.Second)
+		<-time.After(time.Second)
 		<-opened
 		endpoint := <-created
 		if err := m.Close(); err != nil {
@@ -201,7 +201,7 @@ func TestRouterRestartsAfterUnexpectedNodeExit(t *testing.T) {
 			t.Fatalf("admitted a destination during router replacement: %v", err)
 		}
 		unblockClose()
-		<-time.After(5 * time.Second)
+		<-time.After(time.Second)
 		<-opened
 		synctest.Wait()
 		endpoint, err = m.createRouterDestination(t.Context(), ivnp.DestinationSpec{})
