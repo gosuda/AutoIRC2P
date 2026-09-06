@@ -2,6 +2,25 @@
 
 Read and chat on IRC2P with automatic translation. Each account has its own I2P identity. The I2P router is built in—no separate daemon is needed.
 
+## One-command Docker launch
+
+From the cloned repository, with `OPENAI_API_KEY` exported in your shell, run this single command to build and start Portalite mode—no `.env`, Compose, domain, or inbound ports needed:
+
+```sh
+: "${OPENAI_API_KEY:?Export OPENAI_API_KEY first}" && docker build -t autoirc2p . && docker run -d \
+  --name autoirc2p --restart unless-stopped \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --tmpfs /tmp:rw,nosuid,noexec,size=64m,mode=1777 \
+  --mount type=volume,src=autoirc2p-data,dst=/data \
+  --env PORTALITE=1 --env OPENAI_API_KEY \
+  --env OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai \
+  autoirc2p
+```
+
+Run `docker logs -f autoirc2p` and open a ready HTTPS URL. The command uses Google's API; change `OPENAI_BASE_URL` and pass `OPENAI_MODEL_0`/`OPENAI_MODEL_1` for another provider. The key is forwarded from your environment rather than included in the command arguments.
+
+This is an alternative to Compose, with its own `autoirc2p-data` volume. To rebuild, first run `docker stop autoirc2p && docker rm autoirc2p`, then repeat the command; the volume preserves your data and Portalite identity. Do not run it alongside an existing deployment when migrating the same accounts.
+
 ## Quick start with Docker Compose
 
 You need Docker Engine with Compose v2 and an OpenAI-compatible API key. The example uses Google's API and Gemma models.
