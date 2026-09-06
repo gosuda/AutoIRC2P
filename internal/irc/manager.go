@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/client"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -62,8 +61,9 @@ type Config struct {
 // Manager callbacks run on connection workers and must not call Close or block.
 type Manager struct {
 	cfg               Config
-	node              *ivnp.Node
-	addressBook       *client.AddressBookService
+	router            *routerRuntime
+	newRouter         func() (*routerRuntime, error)
+	routerReady       bool
 	createDestination func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error)
 	onEvent           func(Event)
 	rooms             map[string]string
@@ -73,7 +73,6 @@ type Manager struct {
 	started           bool
 	closed            bool
 	ready             chan struct{}
-	startErr          error
 	accounts          map[int64]*accountConnection
 	wg                sync.WaitGroup
 	accountWG         sync.WaitGroup
@@ -100,9 +99,10 @@ type accountConnection struct {
 
 type wireConnection struct {
 	net.Conn
-	writeMu   sync.Mutex
-	closeOnce sync.Once
-	closeErr  error
+	writeMu    sync.Mutex
+	closeOnce  sync.Once
+	closeErr   error
+	registered bool
 }
 
 func New(cfg Config, onEvent func(Event)) (*Manager, error) {
@@ -144,24 +144,15 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	if cfg.MaxAccounts > configuration.State.MaxDestinations-2 {
 		return nil, fmt.Errorf("IRC account limit exceeds IVNP destination capacity: %w", errInvalidConfig)
 	}
-	addressBook, err := newAddressBook(configuration)
+	openRouter := func() (*routerRuntime, error) { return openRouterRuntime(configuration) }
+	router, err := openRouter()
 	if err != nil {
-		return nil, fmt.Errorf("open I2P addressbook: %w", err)
-	}
-	// Own the resolver used by account endpoints; avoid two subscription writers.
-	configuration.AddressBook.Enabled = false
-	// The application uses destination endpoints directly, not local proxy ports.
-	configuration.SAM.Enabled = false
-	configuration.HTTPProxy.Enabled = false
-	configuration.SOCKS5.Enabled = false
-	configuration.Control.Enabled = false
-	configuration.Metrics.Enabled = false
-	node, err := ivnp.New(configuration, ivnp.Options{})
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("open embedded IVNP router: %w", err), addressBook.Close(), addressBook.Wait())
+		return nil, err
 	}
 	cfg.Rooms = append([]string(nil), cfg.Rooms...)
-	return &Manager{cfg: cfg, node: node, addressBook: addressBook, createDestination: node.DestinationController().CreateDestination, onEvent: onEvent, rooms: rooms, ready: make(chan struct{}), accounts: make(map[int64]*accountConnection)}, nil
+	manager := &Manager{cfg: cfg, router: router, newRouter: openRouter, onEvent: onEvent, rooms: rooms, ready: make(chan struct{}), accounts: make(map[int64]*accountConnection)}
+	manager.createDestination = manager.createRouterDestination
+	return manager, nil
 }
 
 // Start returns before reseeding, tunnel construction, or IRC registration.
@@ -181,35 +172,6 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.started = true
 	m.wg.Go(m.runRouter)
 	return nil
-}
-
-func (m *Manager) runRouter() {
-	err := m.node.Start(m.ctx)
-	if err == nil && m.addressBook != nil {
-		err = m.addressBook.Start(m.ctx)
-	}
-	m.mu.Lock()
-	m.startErr = err
-	close(m.ready)
-	m.mu.Unlock()
-	if err != nil {
-		m.status(0, "error", "Embedded I2P router failed to start; inspect local router configuration")
-		m.cancel()
-	} else {
-		m.status(0, "connecting", "I2P router started; building anonymous tunnels")
-		<-m.ctx.Done()
-	}
-	m.mu.Lock()
-	for _, state := range m.accounts {
-		m.stopAccountLocked(state)
-	}
-	m.mu.Unlock()
-	m.accountWG.Wait()
-	closeErr := errors.Join(m.addressBook.Close(), m.node.Close())
-	waitErr := errors.Join(m.addressBook.Wait(), m.node.Wait())
-	m.mu.Lock()
-	m.closeErr = errors.Join(m.closeErr, closeErr, waitErr)
-	m.mu.Unlock()
 }
 
 // ConnectObserver pins account zero until manager shutdown. Identity.Keys stays
@@ -415,37 +377,24 @@ func (m *Manager) runAccount(state *accountConnection) {
 		return
 	case <-m.ready:
 	}
-	m.mu.Lock()
-	startErr := m.startErr
-	m.mu.Unlock()
-	if startErr != nil {
-		return
-	}
 	delay := 5 * time.Second
 	for state.ctx.Err() == nil {
+		var err error
+		stage := "destination creation"
 		if endpoint == nil {
-			var err error
 			endpoint, err = m.createDestination(state.ctx, ivnp.DestinationSpec{Local: state.local})
-			if err != nil {
-				slog.Warn("I2P destination creation failed", "error", err)
-				m.status(state.account.ID, "connecting", "I2P identity endpoint unavailable; retrying")
-				if !pause(state.ctx, delay) {
-					return
-				}
-				delay = min(delay*2, 2*time.Minute)
-				continue
+		}
+		if err == nil {
+			stage = "destination readiness"
+			m.status(state.account.ID, "connecting", "Waiting for I2P destination tunnels")
+			if ready, ok := endpoint.(ivnp.ReadyDestinationEndpoint); ok {
+				readyCtx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
+				err = ready.WaitReady(readyCtx)
+				cancel()
+			} else {
+				err = errNoReadiness
 			}
 		}
-		m.status(state.account.ID, "connecting", "Waiting for I2P destination tunnels")
-		ready, ok := endpoint.(ivnp.ReadyDestinationEndpoint)
-		if !ok {
-			m.status(state.account.ID, "error", errNoReadiness.Error())
-			return
-		}
-		stage := "destination readiness"
-		readyCtx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
-		err := ready.WaitReady(readyCtx)
-		cancel()
 		if err == nil {
 			stage = "IRC dial"
 			m.status(state.account.ID, "connecting", "Connecting to IRC over I2P")
@@ -455,19 +404,31 @@ func (m *Manager) runAccount(state *accountConnection) {
 			dialCancel()
 			if err == nil {
 				stage = "IRC session"
-				delay = 5 * time.Second
-				err = m.serveConnection(state, &wireConnection{Conn: conn})
+				wire := &wireConnection{Conn: conn}
+				err = m.serveConnection(state, wire)
+				if wire.registered {
+					delay = 5 * time.Second
+				}
 			}
-		}
-		if errors.Is(err, errNickUnavailable) {
-			m.status(state.account.ID, "error", errNickUnavailable.Error())
-			return
 		}
 		if state.ctx.Err() != nil {
 			return
 		}
-		slog.Warn("IRC connection attempt failed", "account_id", state.account.ID, "stage", stage, "error", err)
-		m.status(state.account.ID, "disconnected", "IRC connection failed during "+stage+"; reconnecting without replaying messages")
+		terminalAccountError := errors.Is(err, errNickUnavailable) || errors.Is(err, errNoReadiness)
+		if state.account.ID != 0 && terminalAccountError {
+			m.status(state.account.ID, "error", err.Error())
+			return
+		}
+		closedEndpoint := errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
+		replaceEndpoint := errors.Is(err, errNoReadiness) || (stage != "IRC session" && closedEndpoint)
+		if endpoint != nil && replaceEndpoint {
+			if closeErr := endpoint.Close(); closeErr != nil {
+				slog.Warn("I2P endpoint cleanup failed", "account_id", state.account.ID, "error", closeErr)
+			}
+			endpoint = nil
+		}
+		slog.Warn("IRC connection attempt failed", "account_id", state.account.ID, "stage", stage, "error", err, "retry_in", delay)
+		m.status(state.account.ID, "disconnected", fmt.Sprintf("IRC connection failed during %s: %v; retrying in %s without replaying messages", stage, err, delay))
 		if !pause(state.ctx, delay) {
 			return
 		}
@@ -540,7 +501,7 @@ func (m *Manager) Close() error {
 			m.wg.Wait()
 			m.accountWG.Wait()
 		} else {
-			m.closeErr = errors.Join(m.addressBook.Close(), m.addressBook.Wait(), m.node.Close(), m.node.Wait())
+			m.closeErr = m.router.close()
 		}
 	})
 	return m.closeErr

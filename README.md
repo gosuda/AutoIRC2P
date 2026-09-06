@@ -78,6 +78,8 @@ Open `https://chat.example.org` in domain mode, or a ready HTTPS URL printed in 
 
 The first I2P connection can take several minutes. **Live feed** means your browser is connected; **I2P network** shows whether IRC is connected. Guests can read; create an account to send messages.
 
+The shared router and IRC reader retry startup failures, disconnects, and observer nickname conflicts until the app shuts down. Retry waits grow from 5 seconds to at most 2 minutes; tunnel preparation can take longer. Logs show the failure and retry delay. Recovery preserves I2P identities and never replays outgoing messages.
+
 ## Customize
 
 Edit `.env`, then run the start command again.

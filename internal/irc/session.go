@@ -89,6 +89,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 					continue
 				}
 				welcome = true
+				conn.registered = true
 				service.server = msg.prefix
 				var err error
 				serviceDeadline, err = m.joinAndDiscoverServices(joinCtx, conn, state.account, &joins)

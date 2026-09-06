@@ -70,7 +70,7 @@ func TestDialIRCResolvesHostOnTheAccountEndpoint(t *testing.T) {
 					t.Error(err)
 				}
 			}()
-			manager := &Manager{cfg: Config{Server: tc.server}, addressBook: tc.book}
+			manager := &Manager{cfg: Config{Server: tc.server}, router: &routerRuntime{addressBook: tc.book}}
 			conn, err := manager.dialIRC(t.Context(), endpoint)
 			if err != nil {
 				t.Fatal(err)

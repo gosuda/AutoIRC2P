@@ -35,10 +35,16 @@ func (m *Manager) dialIRC(ctx context.Context, endpoint i2pDialer) (net.Conn, er
 		return nil, fmt.Errorf("parse IRC server: %w", err)
 	}
 	if !strings.HasSuffix(strings.ToLower(host), ".b32.i2p") {
-		if m.addressBook == nil {
+		m.mu.Lock()
+		router := m.router
+		m.mu.Unlock()
+		if router == nil {
+			return nil, ErrNotStarted
+		}
+		if router.addressBook == nil {
 			return nil, errAddressBookDisabled
 		}
-		host, err = m.addressBook.ResolveDestination(ctx, host)
+		host, err = router.addressBook.ResolveDestination(ctx, host)
 		if err != nil {
 			return nil, fmt.Errorf("resolve IRC hostname: %w", err)
 		}
