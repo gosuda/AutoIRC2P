@@ -29,10 +29,12 @@ type Translator interface {
 	Translate(context.Context, string, string) (string, error)
 }
 type Config struct {
-	Origin, WebDir string
-	Rooms          []string
-	SecureCookies  bool
-	Security       SecurityConfig
+	WebDir string
+	// AllowOrigin must be concurrency-safe and trust only explicitly assigned origins.
+	AllowOrigin   func(string) bool
+	Rooms         []string
+	SecureCookies bool
+	Security      SecurityConfig
 }
 type Message struct {
 	ID               int64  `json:"id"`
@@ -395,9 +397,12 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 func (s *Server) sameOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin != "" {
-		return origin == s.cfg.Origin
+	origins := r.Header.Values("Origin")
+	if len(origins) > 1 {
+		return false
+	}
+	if len(origins) == 1 {
+		return origins[0] != "" && s.cfg.AllowOrigin != nil && s.cfg.AllowOrigin(origins[0])
 	}
 	return r.Header.Get("Sec-Fetch-Site") != "cross-site"
 }

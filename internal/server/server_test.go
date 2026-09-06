@@ -64,7 +64,7 @@ func TestHTTPOnlyExplicitAuthenticatedSendReachesIRC(t *testing.T) {
 	}
 	bridge := &recordingBridge{sent: make(chan string, 10)}
 	tr := &translationStub{}
-	app := New(Config{Origin: "https://chat.example", Rooms: []string{"#private-test"}}, q, a, tr, bridge)
+	app := New(Config{AllowOrigin: func(origin string) bool { return origin == "https://chat.example" }, Rooms: []string{"#private-test"}}, q, a, tr, bridge)
 	done := make(chan struct{})
 	go func() { defer close(done); app.Run(ctx) }()
 	defer func() { cancel(); <-done }()

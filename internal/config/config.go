@@ -23,6 +23,9 @@ type Config struct {
 	HTTPBodyTimeout, HTTPWriteTimeout, IRCAccountIdleGrace                  time.Duration
 	IRCMaxAccounts                                                          int
 	SecureCookies, Offline                                                  bool
+	Portalite                                                               bool
+	PortaliteName                                                           string
+	PortaliteRelays                                                         []string
 }
 
 func LoadEnv(path string) error {
@@ -70,23 +73,32 @@ const defaultRooms = "#i2p,#i2p-chat,#saltr,#i2p-dev,#i2pd-dev,#i2pd,#ru,#scanne
 
 func Load() (Config, error) {
 	cfg := Config{Listen: env("LISTEN_ADDR", "127.0.0.1:8080"), Origin: env("APP_ORIGIN", "http://localhost:8080"), DataDir: env("DATA_DIR", "data"), WebDir: env("WEB_DIR", "web/build"), IVNPConfig: env("IVNP_CONFIG", "data/ivnp.conf"), IRCServer: env("IRC_SERVER", "irc.postman.i2p:6667"), BaseURL: os.Getenv("OPENAI_BASE_URL"), APIKey: os.Getenv("OPENAI_API_KEY"), Models: []string{env("OPENAI_MODEL_0", "gemma-4-31b-it"), env("OPENAI_MODEL_1", "gemma-4-26b-a4b-it")}, Rooms: strings.Split(env("IRC_ROOMS", defaultRooms), ","), Offline: os.Getenv("IRC_OFFLINE") == "1"}
+	if err := cfg.loadPortalite(); err != nil {
+		return cfg, err
+	}
 	cfg.ObserverNick = os.Getenv("IRC_OBSERVER_NICK")
 	cfg.ObserverPassword = os.Getenv("IRC_OBSERVER_PASSWORD")
 	if (cfg.ObserverNick == "") != (cfg.ObserverPassword == "") {
 		return cfg, fmt.Errorf("IRC_OBSERVER_NICK and IRC_OBSERVER_PASSWORD must be set together")
 	}
-	parsed, err := url.Parse(cfg.Origin)
-	if err != nil {
-		return cfg, fmt.Errorf("invalid APP_ORIGIN: %w", err)
-	}
-	validScheme := parsed.Scheme == "https" || parsed.Scheme == "http"
-	invalidOrigin := parsed.Host == "" || !validScheme || parsed.Path != ""
-	if invalidOrigin || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return cfg, fmt.Errorf("APP_ORIGIN must be an http(s) origin without trailing slash")
-	}
-	cfg.SecureCookies = parsed.Scheme == "https"
-	if !cfg.SecureCookies && parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "::1" {
-		return cfg, fmt.Errorf("public APP_ORIGIN requires HTTPS")
+	var err error
+	if cfg.Portalite {
+		cfg.Origin = ""
+		cfg.SecureCookies = true
+	} else {
+		parsed, parseErr := url.Parse(cfg.Origin)
+		if parseErr != nil {
+			return cfg, fmt.Errorf("invalid APP_ORIGIN: %w", parseErr)
+		}
+		validScheme := parsed.Scheme == "https" || parsed.Scheme == "http"
+		invalidOrigin := parsed.Host == "" || !validScheme || parsed.Path != ""
+		if invalidOrigin || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return cfg, fmt.Errorf("APP_ORIGIN must be an http(s) origin without trailing slash")
+		}
+		cfg.SecureCookies = parsed.Scheme == "https"
+		if !cfg.SecureCookies && parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "::1" {
+			return cfg, fmt.Errorf("public APP_ORIGIN requires HTTPS")
+		}
 	}
 	for i, room := range cfg.Rooms {
 		room = strings.TrimSpace(room)

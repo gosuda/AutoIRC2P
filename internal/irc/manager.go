@@ -136,7 +136,7 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 		}
 		rooms[fold(room)] = room
 	}
-	configuration, err := ivnp.LoadOrCreateConfig(cfg.ConfigPath)
+	configuration, err := loadRouterConfig(cfg.ConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("load IVNP configuration: %w", err)
 	}

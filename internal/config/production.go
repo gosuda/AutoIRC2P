@@ -75,6 +75,9 @@ func (c *Config) loadProduction() error {
 	if err != nil {
 		return err
 	}
+	if c.Portalite && len(c.Security.TrustedProxies) != 0 {
+		return fmt.Errorf("TRUSTED_PROXY_CIDRS must be empty in Portalite mode: relay streams carry client-controlled forwarded headers")
+	}
 	integers := []struct {
 		name     string
 		fallback int
@@ -130,7 +133,7 @@ func (c *Config) loadProduction() error {
 	if err != nil {
 		return fmt.Errorf("LISTEN_ADDR must include a host and port")
 	}
-	if os.Getenv("APP_ORIGIN") == "" && host != "localhost" {
+	if !c.Portalite && os.Getenv("APP_ORIGIN") == "" && host != "localhost" {
 		ip, parseErr := netip.ParseAddr(host)
 		if parseErr != nil || !ip.IsLoopback() {
 			return fmt.Errorf("APP_ORIGIN must be explicitly set for a non-loopback listener")

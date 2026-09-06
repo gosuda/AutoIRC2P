@@ -1,0 +1,30 @@
+name: autoirc2p
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORTALITE: "1"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      APP_ORIGIN: ""
+      DATA_DIR: /data
+      WEB_DIR: /app/web
+      IVNP_CONFIG: /data/ivnp.conf
+      TRUSTED_PROXY_CIDRS: ""
+    volumes:
+      - app_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: local
+
+volumes:
+  app_data:

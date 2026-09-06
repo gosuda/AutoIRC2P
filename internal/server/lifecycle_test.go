@@ -54,7 +54,7 @@ func lifecycleServer(t *testing.T, b Bridge) (*Server, store.User, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := New(Config{Origin: "https://chat.example", Rooms: []string{"#one", "#two"}}, q, a, &translationStub{}, b)
+	app := New(Config{AllowOrigin: func(origin string) bool { return origin == "https://chat.example" }, Rooms: []string{"#one", "#two"}}, q, a, &translationStub{}, b)
 	t.Cleanup(app.cancel)
 	return app, user, token
 }

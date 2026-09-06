@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"github.com/gosuda/AutoIRC2P/internal/server"
 	"github.com/gosuda/AutoIRC2P/internal/store"
 	"github.com/gosuda/AutoIRC2P/internal/translate"
+	"gosuda.org/portalite"
 )
 
 func main() {
@@ -56,16 +58,46 @@ func run() (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, bridge.Close()) }()
-	app = server.New(server.Config{Origin: cfg.Origin, WebDir: cfg.WebDir, Rooms: cfg.Rooms, SecureCookies: cfg.SecureCookies, Security: server.SecurityConfig{
+	listener, allowOrigin, err := openHTTPListener(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	var workers sync.WaitGroup
+	defer func() {
+		stop()
+		closeErr := listener.Close()
+		if !errors.Is(closeErr, net.ErrClosed) {
+			err = errors.Join(err, closeErr)
+		}
+		workers.Wait()
+	}()
+	if exposure, ok := listener.(*portalite.Exposure); ok {
+		workers.Go(func() { logPortaliteUpdates(exposure) })
+	}
+	app = server.New(server.Config{AllowOrigin: allowOrigin, WebDir: cfg.WebDir, Rooms: cfg.Rooms, SecureCookies: cfg.SecureCookies, Security: server.SecurityConfig{
 		TrustedProxies: cfg.Security.TrustedProxies,
 		MaxWebSockets:  cfg.Security.MaxWebSockets, MaxWebSocketsPerIP: cfg.Security.MaxWebSocketsPerIP, MaxWebSocketsPerAccount: cfg.Security.MaxWebSocketsPerAccount,
 		WSHandshakesPerMinute: cfg.Security.WSHandshakesPerMinute, CursorUpdatesPerMinute: cfg.Security.CursorUpdatesPerMinute,
 		SendRequestsPerMinute: cfg.Security.SendRequestsPerMinute, SendRequestsPerIPMinute: cfg.Security.SendRequestsPerIPMinute, MaxPendingSends: cfg.Security.MaxPendingSends,
 	}}, queries, accounts, translator, bridge)
-	var workers sync.WaitGroup
 	workers.Go(func() { app.Run(ctx) })
 	workers.Go(func() { runRetention(ctx, queries, cfg.Retention) })
-	defer func() { stop(); workers.Wait() }()
+	httpServer := &http.Server{Addr: cfg.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.HTTPBodyTimeout, WriteTimeout: cfg.HTTPWriteTimeout, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16384}
+	serverError := make(chan error, 1)
+	workers.Go(func() {
+		slog.Info("HTTP listening", "address", listener.Addr().String(), "portalite", cfg.Portalite)
+		serverError <- httpServer.Serve(listener)
+	})
+	defer func() {
+		stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		shutdownErr := httpServer.Shutdown(shutdownCtx)
+		if shutdownErr != nil {
+			shutdownErr = errors.Join(shutdownErr, httpServer.Close())
+		}
+		err = errors.Join(err, shutdownErr)
+	}()
 	if !cfg.Offline {
 		if err = bridge.Start(ctx); err != nil {
 			return err
@@ -84,25 +116,13 @@ func run() (err error) {
 	} else {
 		app.Event(ctx, irc.Event{Kind: "status", State: "disconnected", Text: "IRC_OFFLINE is enabled"})
 	}
-	httpServer := &http.Server{Addr: cfg.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.HTTPBodyTimeout, WriteTimeout: cfg.HTTPWriteTimeout, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16384}
-	serverError := make(chan error, 1)
-	workers.Go(func() {
-		slog.Info("HTTP listening", "address", cfg.Listen, "origin", cfg.Origin)
-		serverError <- httpServer.ListenAndServe()
-	})
 	select {
 	case <-ctx.Done():
 	case err = <-serverError:
 		stop()
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	shutdownErr := httpServer.Shutdown(shutdownCtx)
-	if shutdownErr != nil {
-		shutdownErr = errors.Join(shutdownErr, httpServer.Close())
-	}
-	if errors.Is(err, http.ErrServerClosed) {
+	if errors.Is(err, http.ErrServerClosed) || (ctx.Err() != nil && errors.Is(err, net.ErrClosed)) {
 		err = nil
 	}
-	return errors.Join(err, shutdownErr)
+	return err
 }
