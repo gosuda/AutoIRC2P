@@ -1,0 +1,233 @@
+package irc
+
+import (
+	"bufio"
+	"cmp"
+	"context"
+	"errors"
+	"net"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+)
+
+const channelJoinInterval = 2 * time.Second
+
+func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection) (result error) {
+	joinCtx, cancelJoins := context.WithCancel(m.ctx)
+	var joins sync.WaitGroup
+	stop := context.AfterFunc(m.ctx, func() { _ = conn.Close() })
+	defer stop()
+	defer func() {
+		cancelJoins()
+		result = errors.Join(result, conn.Close())
+		joins.Wait()
+		state.mu.Lock()
+		state.connection = nil
+		clear(state.joined)
+		clear(state.unavailable)
+		state.mu.Unlock()
+	}()
+	state.mu.Lock()
+	state.connection = conn
+	state.mu.Unlock()
+	if err := conn.write(m.ctx, "NICK "+state.account.Nick); err != nil {
+		return err
+	}
+	if err := conn.write(m.ctx, "USER "+state.account.Nick+" 0 * :HexChat"); err != nil {
+		return err
+	}
+
+	reader := bufio.NewReaderSize(conn, 512)
+	service := nickService{account: state.account}
+	welcome := false
+	idleTimeout := cmp.Or(m.cfg.IdleTimeout, 20*time.Minute)
+	welcomeDeadline := time.Now().Add(idleTimeout)
+	var serviceDeadline, lastVersion time.Time
+	pongTimeout := cmp.Or(m.cfg.PongTimeout, 2*time.Minute)
+	for {
+		deadline := time.Now().Add(idleTimeout)
+		if !welcome {
+			deadline = welcomeDeadline
+		}
+		if !service.done && !serviceDeadline.IsZero() && serviceDeadline.Before(deadline) {
+			deadline = serviceDeadline
+		}
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			return err
+		}
+		msg, err := readFrame(reader)
+		serviceExpired := !service.done && !serviceDeadline.IsZero() && !time.Now().Before(serviceDeadline)
+		if err != nil {
+			if welcome && serviceExpired && timeoutError(err) {
+				service.done = true
+				m.status(state.account.ID, "error", "NickServ verification timed out; no further credentials sent")
+				continue
+			}
+			return err
+		}
+		if serviceExpired {
+			service.done = true
+			m.status(state.account.ID, "error", "NickServ verification timed out; no further credentials sent")
+		}
+		if msg.command == "PING" && len(msg.params) > 0 {
+			if err := conn.writeWithTimeout(m.ctx, "PONG :"+msg.params[len(msg.params)-1], pongTimeout); err != nil {
+				return err
+			}
+			continue
+		}
+		if msg.command == "ERROR" {
+			return net.ErrClosed
+		}
+		if serverSource(msg.prefix) {
+			switch msg.command {
+			case "432", "433", "436", "437":
+				return errNickUnavailable
+			case "001":
+				if welcome || len(msg.params) < 1 || fold(msg.params[0]) != fold(state.account.Nick) {
+					continue
+				}
+				welcome = true
+				service.server = msg.prefix
+				var err error
+				serviceDeadline, err = m.joinAndDiscoverServices(joinCtx, conn, state.account, &joins)
+				if err != nil {
+					return err
+				}
+			case "403", "405", "471", "473", "474", "475", "477", "489":
+				if len(msg.params) > 1 {
+					m.setRoomState(state, msg.params[1], RoomUnavailable)
+				}
+				m.status(state.account.ID, "error", "IRC server refused a configured room; check channel access requirements")
+			}
+		}
+		if !welcome {
+			continue
+		}
+		action := service.accept(msg)
+		if action.status != "" {
+			status := "error"
+			if action.registered || action.line != "" {
+				status = "connected"
+			}
+			m.status(state.account.ID, status, action.status)
+		}
+		if action.line != "" {
+			if err := conn.write(m.ctx, action.line); err != nil {
+				return err
+			}
+		}
+		if action.registered {
+			state.account.Registered = true
+			m.onEvent(Event{AccountID: state.account.ID, Kind: "registered", Service: true})
+		}
+		if len(msg.params) == 0 {
+			continue
+		}
+		nick := sourceNick(msg.prefix)
+		if fold(nick) == fold(state.account.Nick) {
+			switch msg.command {
+			case "JOIN":
+				if room, ok := m.rooms[fold(msg.params[0])]; ok {
+					m.setRoomState(state, room, RoomReady)
+					m.status(state.account.ID, "connected", "IRC connected; joined "+room)
+				}
+			case "PART":
+				m.setRoomState(state, msg.params[0], RoomUnavailable)
+			case "NICK":
+				return errNickUnavailable
+			}
+		}
+		if msg.command == "KICK" && len(msg.params) >= 2 && fold(msg.params[1]) == fold(state.account.Nick) {
+			m.setRoomState(state, msg.params[0], RoomUnavailable)
+			m.status(state.account.ID, "error", "Removed from an IRC room; not automatically rejoining")
+		}
+		if msg.command != "PRIVMSG" && msg.command != "NOTICE" || len(msg.params) != 2 {
+			continue
+		}
+		text := msg.params[1]
+		if msg.command == "PRIVMSG" && text == "\x01VERSION\x01" && fold(msg.params[0]) == fold(state.account.Nick) && validNick(nick) && time.Since(lastVersion) >= 10*time.Second {
+			lastVersion = time.Now()
+			if err := conn.write(m.ctx, "NOTICE "+nick+" :\x01VERSION HexChat 2.16.2\x01"); err != nil {
+				return err
+			}
+			continue
+		}
+		if !utf8.ValidString(text) {
+			continue
+		}
+		isService := msg.command == "NOTICE" || serviceNick(nick) || !strings.Contains(msg.prefix, "!") || strings.ContainsRune(text, '\x01')
+		if isService {
+			text = m.redactService(state, text)
+		}
+		if isService && fold(msg.params[0]) == fold(state.account.Nick) {
+			m.onEvent(Event{AccountID: state.account.ID, Nick: nick, Text: text, Service: true, Kind: "message"})
+			continue
+		}
+		room, ok := m.rooms[fold(msg.params[0])]
+		if !ok || state.account.ID != 0 || !validNick(nick) {
+			continue
+		}
+		m.onEvent(Event{AccountID: 0, Room: room, Nick: nick, Text: text, Service: isService, Kind: "message"})
+	}
+}
+
+func (m *Manager) joinAndDiscoverServices(ctx context.Context, conn *wireConnection, account Account, joins *sync.WaitGroup) (time.Time, error) {
+	m.status(account.ID, "connected", "IRC connected; joining configured rooms")
+	var deadline time.Time
+	if account.Password != "" {
+		deadline = time.Now().Add(time.Minute)
+		if err := conn.write(ctx, "WHOIS NickServ"); err != nil {
+			return time.Time{}, err
+		}
+	}
+	joins.Go(func() {
+		if err := m.joinRooms(ctx, conn); err != nil && ctx.Err() == nil {
+			m.status(account.ID, "error", "IRC channel join failed; reconnecting")
+			if err := conn.Close(); err != nil {
+				m.status(account.ID, "error", "IRC connection cleanup failed")
+			}
+		}
+	})
+	return deadline, nil
+}
+
+func (m *Manager) joinRooms(ctx context.Context, conn *wireConnection) error {
+	for index, room := range m.cfg.Rooms {
+		if index > 0 && !pause(ctx, channelJoinInterval) {
+			return ctx.Err()
+		}
+		if err := conn.write(ctx, "JOIN "+room); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func timeoutError(err error) bool {
+	var timeout net.Error
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
+func (m *Manager) redactService(state *accountConnection, text string) string {
+	if state.account.Password != "" {
+		text = strings.ReplaceAll(text, state.account.Password, "[redacted]")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, other := range m.accounts {
+		if id != state.account.ID && other.account.Password != "" {
+			text = strings.ReplaceAll(text, other.account.Password, "[redacted]")
+		}
+	}
+	return text
+}
+
+func serviceNick(nick string) bool {
+	switch fold(nick) {
+	case "nickserv", "chanserv", "memoserv", "operserv", "hostserv", "botserv", "helpserv", "global":
+		return true
+	}
+	return false
+}

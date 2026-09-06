@@ -1,0 +1,104 @@
+import type { Language } from './api';
+
+const en = {
+  rooms: 'Rooms', network: 'Connection details', connecting: 'Connecting', live: 'Connected',
+  reconnecting: 'Reconnecting', initializing: 'Opening workspace', retry: 'Try again',
+  login: 'Sign in', register: 'Create account', logout: 'Sign out', guest: 'Read-only guest',
+  account: 'Account', email: 'Email', password: 'Password', nick: 'Nickname', close: 'Close',
+  loginTitle: 'Welcome back.', registerTitle: 'Make yourself at home.',
+  loginDescription: 'Sign in to send messages with your own nickname.',
+  registerDescription: 'Create an account to join the conversation. Reading needs no account.',
+  privateEmail: 'Your account email is never shown as your public nickname.',
+  passwordNote: 'Your browser derives a sign-in key. The password itself is never sent.',
+  working: 'Please wait…', authenticating: 'Securing your session…',
+  needAccount: 'New here?', haveAccount: 'Already have an account?',
+  displayLanguage: 'Read translations in', roomLanguage: 'Room language',
+  translation: 'Translation', original: 'Original', pending: 'Translation pending…',
+  failed: 'Translation unavailable. The original is shown below.',
+  excluded: 'Not translated', service: 'Service message · untranslated', unknown: 'Unknown',
+  messages: 'Conversation', emptyTitle: 'The conversation starts here.',
+  emptyDescription: 'No saved messages in this room yet. New messages will appear here.',
+  loadingHistory: 'Loading conversation', historyError: 'Conversation unavailable',
+  noRooms: 'No rooms are configured.', compose: 'Message', send: 'Send', sendOriginal: 'Send original',
+  sending: 'Sending…', releaseOriginal: 'Release for original',
+  holdHint: 'Hold to send original.',
+  lineError: 'Use a single line without control characters.',
+  gateTitle: 'Join the conversation.',
+  gateDescription: 'Sign in to send messages. You can read without an account.',
+  latest: 'Jump to latest', notSent: 'Could not confirm sending.',
+  noRetry: 'Check before sending again.',
+  connectionNote: 'Connecting…',
+  networkState: 'Network state', feedState: 'Feed state', refreshSession: 'Refresh connection',
+  signedIn: 'Signed in', loggedOut: 'Signed out', requestFailed: 'Request failed',
+  sessionError: 'Could not open the conversation.',
+  roomListHint: 'Available rooms are configured by the server.', originalDescription: 'Bypass translation for this message',
+  selectedRoom: 'Current room',
+  preparing: 'Preparing to send', readyToChat: 'Ready to chat', unavailable: 'Connection unavailable',
+  searchRooms: 'Search rooms', allRooms: 'All rooms', focusedRooms: 'Your rooms',
+  favorites: 'Favorites', addFavorite: 'Add favorite', removeFavorite: 'Remove favorite',
+  noFavorites: 'Star a room to keep it here.', noResults: 'No matching rooms.', clearSearch: 'Clear search',
+  unread: 'unread',
+  storageUnavailable: 'Could not save preferences.',
+  you: 'You', translating: 'Translating', awaitingEcho: 'Sending', sent: 'Sent',
+  sendFailed: 'Not sent', unconfirmed: 'Send not confirmed', outgoing: 'Outgoing messages',
+  translationSendFailed: 'Translation failed. Your draft is still here.', messageInvalid: 'This message is too long or contains unsupported characters.', requestConflict: 'This request was already handled. Check the conversation before sending again.', signInToSend: 'Sign in to send this message.',
+  checkStatus: 'Check status', checking: 'Checking…', restoreDraft: 'Use as draft',
+  sendsError: 'Could not load outgoing messages.'
+};
+
+const ko: typeof en = {
+  rooms: '대화방', network: '연결 상세', connecting: '연결 중', live: '연결됨',
+  reconnecting: '다시 연결 중', initializing: '대화 공간을 여는 중', retry: '다시 시도',
+  login: '로그인', register: '계정 만들기', logout: '로그아웃', guest: '읽기 전용 방문자',
+  account: '계정', email: '이메일', password: '비밀번호', nick: '닉네임', close: '닫기',
+  loginTitle: '다시 만나 반가워요.', registerTitle: '나만의 이름으로 참여하세요.',
+  loginDescription: '로그인하여 나만의 닉네임으로 메시지를 보내세요.',
+  registerDescription: '계정을 만들고 대화에 참여하세요. 읽기는 계정 없이 가능합니다.',
+  privateEmail: '계정 이메일은 공개 닉네임으로 표시되지 않습니다.',
+  passwordNote: '브라우저에서 로그인 키를 만듭니다. 비밀번호 자체는 전송하지 않습니다.',
+  working: '잠시 기다려 주세요…', authenticating: '세션을 보호하는 중…',
+  needAccount: '처음 오셨나요?', haveAccount: '이미 계정이 있나요?',
+  displayLanguage: '번역 표시 언어', roomLanguage: '대화방 언어',
+  translation: '번역', original: '원문', pending: '번역을 기다리는 중…',
+  failed: '번역할 수 없습니다. 아래 원문을 확인하세요.',
+  excluded: '번역하지 않음', service: '서비스 메시지 · 번역하지 않음', unknown: '알 수 없음',
+  messages: '대화', emptyTitle: '여기서 대화를 시작하세요.',
+  emptyDescription: '아직 저장된 메시지가 없습니다. 새 메시지가 여기에 표시됩니다.',
+  loadingHistory: '대화 불러오는 중', historyError: '대화를 불러올 수 없음',
+  noRooms: '설정된 대화방이 없습니다.', compose: '메시지', send: '보내기', sendOriginal: '원문 보내기',
+  sending: '전송 중…', releaseOriginal: '놓으면 원문 전송',
+  holdHint: '길게 누르면 원문 전송',
+  lineError: '제어 문자가 없는 한 줄로 입력하세요.',
+  gateTitle: '대화에 참여하세요.',
+  gateDescription: '로그인하면 메시지를 보낼 수 있습니다. 읽기는 계정 없이 가능합니다.',
+  latest: '최신 메시지로', notSent: '전송 여부를 확인할 수 없습니다.',
+  noRetry: '확인 후 다시 보내세요.',
+  connectionNote: '연결 준비 중',
+  networkState: '네트워크 상태', feedState: '수신 상태', refreshSession: '연결 상태 새로고침',
+  signedIn: '로그인됨', loggedOut: '로그아웃됨', requestFailed: '요청 실패',
+  sessionError: '대화를 열 수 없습니다.',
+  roomListHint: '서버에 설정된 대화방만 표시합니다.', originalDescription: '이 메시지를 번역 없이 보내기',
+  selectedRoom: '현재 대화방',
+  preparing: '보내기 준비 중', readyToChat: '대화 가능', unavailable: '연결할 수 없음',
+  searchRooms: '대화방 검색', allRooms: '모든 대화방', focusedRooms: '내 대화방',
+  favorites: '즐겨찾기', addFavorite: '즐겨찾기 추가', removeFavorite: '즐겨찾기 해제',
+  noFavorites: '별표를 눌러 자주 찾는 대화방을 모아 보세요.', noResults: '일치하는 대화방이 없습니다.', clearSearch: '검색 지우기',
+  unread: '읽지 않음',
+  storageUnavailable: '설정을 저장하지 못했어요.',
+  you: '나', translating: '번역 중', awaitingEcho: '전송 중', sent: '전송 확인',
+  sendFailed: '전송 실패', unconfirmed: '전송 확인 불가', outgoing: '보내는 메시지',
+  translationSendFailed: '번역하지 못했어요. 작성한 내용은 그대로 남아 있어요.', messageInvalid: '메시지가 너무 길거나 보낼 수 없는 문자가 있어요.', requestConflict: '이미 처리한 요청이에요. 다시 보내기 전에 대화를 확인해 주세요.', signInToSend: '메시지를 보내려면 로그인해 주세요.',
+  checkStatus: '상태 확인', checking: '확인 중…', restoreDraft: '초안으로 사용',
+  sendsError: '보내는 메시지를 불러올 수 없습니다.'
+};
+
+export const copy: Record<Language, typeof en> = { en, ko };
+
+export function languageName(code: string, displayLanguage: Language): string {
+  if (!code || code === 'und') return copy[displayLanguage].unknown;
+  try {
+    return new Intl.DisplayNames([displayLanguage], { type: 'language' }).of(code) ?? code;
+  } catch {
+    return code;
+  }
+}

@@ -1,0 +1,11 @@
+ALTER TABLE messages ADD COLUMN sender_user_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN sender_request_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE send_requests ADD COLUMN original_mode INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE send_requests ADD COLUMN error_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE send_requests ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE send_requests ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0;
+UPDATE messages SET sender_user_id = COALESCE((SELECT user_id FROM send_requests WHERE message_id = messages.id AND echo_consumed = 1 LIMIT 1),0), sender_request_id = COALESCE((SELECT request_id FROM send_requests WHERE message_id = messages.id AND echo_consumed = 1 LIMIT 1),'');
+UPDATE send_requests SET state = CASE WHEN message_id > 0 AND echo_consumed = 1 THEN 'confirmed' WHEN state IN ('sent','sending') THEN 'unconfirmed' ELSE 'failed' END, error_code = CASE WHEN message_id > 0 AND echo_consumed = 1 THEN '' ELSE 'interrupted' END, updated_at = created_at;
+UPDATE send_requests SET expires_at = created_at + 120000;
+CREATE INDEX send_requests_echo ON send_requests(room,nick COLLATE NOCASE,wire_text,created_at);
+CREATE INDEX send_requests_user_room ON send_requests(user_id,room,created_at DESC);

@@ -1,0 +1,105 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/gosuda/AutoIRC2P/internal/auth"
+	"github.com/gosuda/AutoIRC2P/internal/config"
+	"github.com/gosuda/AutoIRC2P/internal/irc"
+	"github.com/gosuda/AutoIRC2P/internal/server"
+	"github.com/gosuda/AutoIRC2P/internal/store"
+	"github.com/gosuda/AutoIRC2P/internal/translate"
+)
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
+}
+func run() (err error) {
+	if err = config.LoadEnv(".env"); err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	key, err := config.Key(filepath.Join(cfg.DataDir, "application.key"))
+	if err != nil {
+		return err
+	}
+	db, queries, err := store.NewSQLite(ctx, filepath.Join(cfg.DataDir, "chat.sqlite"))
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, db.Close()) }()
+	accounts, err := auth.New(queries, key)
+	if err != nil {
+		return err
+	}
+	translator, err := translate.New(translate.Config{BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Models: cfg.Models, Interval: cfg.Interval, Cooldown: cfg.Cooldown, FailureThreshold: 3}, &http.Client{Timeout: 60 * time.Second}, queries)
+	if err != nil {
+		return err
+	}
+	var app *server.Server
+	bridge, err := irc.New(irc.Config{ConfigPath: cfg.IVNPConfig, Server: cfg.IRCServer, Rooms: cfg.Rooms, IdleTimeout: cfg.IRCIdleTimeout, PongTimeout: cfg.IRCPongTimeout}, func(event irc.Event) { app.Event(ctx, event) })
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, bridge.Close()) }()
+	app = server.New(server.Config{Origin: cfg.Origin, WebDir: cfg.WebDir, Rooms: cfg.Rooms, SecureCookies: cfg.SecureCookies}, queries, accounts, translator, bridge)
+	var workers sync.WaitGroup
+	workers.Go(func() { app.Run(ctx) })
+	defer func() { stop(); workers.Wait() }()
+	if !cfg.Offline {
+		if err = bridge.Start(ctx); err != nil {
+			return err
+		}
+		observer, err := accounts.Observer(ctx)
+		if err != nil {
+			return err
+		}
+		if cfg.ObserverNick != "" {
+			observer.Nick = cfg.ObserverNick
+			observer.Password = cfg.ObserverPassword
+		}
+		if err = bridge.Connect(ctx, observer); err != nil {
+			return err
+		}
+	} else {
+		app.Event(ctx, irc.Event{Kind: "status", State: "disconnected", Text: "IRC_OFFLINE is enabled"})
+	}
+	httpServer := &http.Server{Addr: cfg.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16384}
+	serverError := make(chan error, 1)
+	workers.Go(func() {
+		slog.Info("HTTP listening", "address", cfg.Listen, "origin", cfg.Origin)
+		serverError <- httpServer.ListenAndServe()
+	})
+	select {
+	case <-ctx.Done():
+	case err = <-serverError:
+		stop()
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdownErr := httpServer.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		shutdownErr = errors.Join(shutdownErr, httpServer.Close())
+	}
+	if errors.Is(err, http.ErrServerClosed) {
+		err = nil
+	}
+	return errors.Join(err, shutdownErr)
+}
