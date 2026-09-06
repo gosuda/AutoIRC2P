@@ -37,3 +37,7 @@ web/.svelte-kit/
 web/build/
 /autoirc2p
 *.sqlite*
+
+/.agents/
+/.hallmark/
+/skills-lock.json
