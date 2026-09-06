@@ -11,6 +11,9 @@ type authWindow struct {
 }
 
 func (s *Server) limitAuthentication(next http.HandlerFunc) http.HandlerFunc {
+	if s.cfg.Security.DisableRateLimits {
+		return next
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		host := s.clientIP(r)
 		now := time.Now()

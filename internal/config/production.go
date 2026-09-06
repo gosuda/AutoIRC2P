@@ -12,6 +12,7 @@ import (
 
 type Security struct {
 	TrustedProxies                                                  []netip.Prefix
+	DisableRateLimits                                               bool
 	MaxWebSockets, MaxWebSocketsPerIP, MaxWebSocketsPerAccount      int
 	WSHandshakesPerMinute, CursorUpdatesPerMinute                   int
 	SendRequestsPerMinute, SendRequestsPerIPMinute, MaxPendingSends int
@@ -62,9 +63,6 @@ func trustedProxies(raw string) ([]netip.Prefix, error) {
 			}
 			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
 		}
-		if prefix.Bits() == 0 {
-			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS must not trust all addresses")
-		}
 		prefixes = append(prefixes, prefix.Masked())
 	}
 	return prefixes, nil
@@ -75,8 +73,12 @@ func (c *Config) loadProduction() error {
 	if err != nil {
 		return err
 	}
-	if c.Portalite && len(c.Security.TrustedProxies) != 0 {
-		return fmt.Errorf("TRUSTED_PROXY_CIDRS must be empty in Portalite mode: relay streams carry client-controlled forwarded headers")
+	switch os.Getenv("RATE_LIMIT_ENABLED") {
+	case "", "1":
+	case "0":
+		c.Security.DisableRateLimits = true
+	default:
+		return fmt.Errorf("RATE_LIMIT_ENABLED must be 0 or 1")
 	}
 	integers := []struct {
 		name     string

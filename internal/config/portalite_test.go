@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"gosuda.org/portalite"
+)
 
 func TestPortaliteUsesRelayOriginsWithoutPublicHost(t *testing.T) {
 	productionTestEnv(t)
@@ -32,12 +36,10 @@ func TestPortaliteRejectsInvalidEnvironment(t *testing.T) {
 		{"PORTALITE", "true"},
 		{"PORTALITE_NAME", "bad.name"},
 		{"PORTALITE_NAME", "-bad"},
-		{"PORTALITE_NAME", "UPPERCASE"},
 		{"PORTALITE_RELAYS", "http://relay.example"},
 		{"PORTALITE_RELAYS", "https://relay.example,"},
 		{"PORTALITE_RELAYS", "https://user:password@relay.example"},
 		{"PORTALITE_RELAYS", "https://relay.example?token=secret"},
-		{"TRUSTED_PROXY_CIDRS", "127.0.0.1/32"},
 	} {
 		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
 			productionTestEnv(t)
@@ -47,5 +49,22 @@ func TestPortaliteRejectsInvalidEnvironment(t *testing.T) {
 				t.Fatal("invalid Portalite configuration accepted")
 			}
 		})
+	}
+}
+
+func TestPortaliteAcceptsMixedCaseIdentityName(t *testing.T) {
+	productionTestEnv(t)
+	t.Setenv("PORTALITE", "1")
+	t.Setenv("PORTALITE_NAME", "My-CHAT")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := portalite.GenerateIdentity(cfg.PortaliteName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Name() != "my-chat" {
+		t.Fatalf("relay DNS name = %q, want my-chat", identity.Name())
 	}
 }

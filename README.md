@@ -63,7 +63,7 @@ OPENAI_API_KEY=your-api-key
 
 Leave `PORTALITE_RELAYS` empty for the default relays, or set a comma-separated list such as `https://rly.best,https://gosunuts.xyz`. The generated private identity is saved in the data volume; keep it to retain the same identity across restarts. Relay availability is not guaranteed.
 
-Leave `PORTALITE_NAME` empty to generate a unique name, or choose an available lowercase name before the first start. Changing it later does not replace the saved identity. Native Portalite runs require `TRUSTED_PROXY_CIDRS` to be empty; Compose sets this automatically.
+Leave `PORTALITE_NAME` empty to generate a unique name, or choose an available name before the first start. Uppercase input is accepted; the SDK normalizes the DNS name to lowercase. Changing it later does not replace the saved identity.
 
 ### 3. Start and open
 
@@ -86,6 +86,10 @@ Edit `.env`, then run the start command again.
 | `OPENAI_BASE_URL`, `OPENAI_MODEL_0`, `OPENAI_MODEL_1` | Choose your translation provider and models. |
 | `TRANSLATION_INTERVAL=5s` | Increase this if you hit your provider's quota. |
 | `IRC_OBSERVER_NICK`, `IRC_OBSERVER_PASSWORD` | Optional NickServ credentials for the shared reader; set both or neither. |
+| `RATE_LIMIT_ENABLED=0` | Disable login, WebSocket handshake, message-send, and read-cursor request quotas. Default: `1`. |
+| `TRUSTED_PROXY_CIDRS=0.0.0.0/0,::/0` | Explicitly trust forwarded client addresses from any peer, including in Portalite mode. |
+
+Disabling request quotas leaves connection/queue capacity limits and translation-provider pacing active. Trust-all permits forged `X-Forwarded-For` values; use it only when you accept that risk. Both Compose modes honor an explicit trusted-proxy value; their existing defaults remain unchanged. For standalone `docker run`, pass these settings with `--env RATE_LIMIT_ENABLED=0` and `--env TRUSTED_PROXY_CIDRS=0.0.0.0/0,::/0`.
 
 `ivnp.conf` is created automatically if missing: `/data/ivnp.conf` in Docker, `data/ivnp.conf` for a native run. The default tunnel length is **1 hop**. To change it, edit the `[tunnel]` section and restart:
 

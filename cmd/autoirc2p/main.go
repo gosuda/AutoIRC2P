@@ -75,8 +75,9 @@ func run() (err error) {
 		workers.Go(func() { logPortaliteUpdates(exposure) })
 	}
 	app = server.New(server.Config{AllowOrigin: allowOrigin, WebDir: cfg.WebDir, Rooms: cfg.Rooms, SecureCookies: cfg.SecureCookies, Security: server.SecurityConfig{
-		TrustedProxies: cfg.Security.TrustedProxies,
-		MaxWebSockets:  cfg.Security.MaxWebSockets, MaxWebSocketsPerIP: cfg.Security.MaxWebSocketsPerIP, MaxWebSocketsPerAccount: cfg.Security.MaxWebSocketsPerAccount,
+		TrustedProxies:    cfg.Security.TrustedProxies,
+		DisableRateLimits: cfg.Security.DisableRateLimits,
+		MaxWebSockets:     cfg.Security.MaxWebSockets, MaxWebSocketsPerIP: cfg.Security.MaxWebSocketsPerIP, MaxWebSocketsPerAccount: cfg.Security.MaxWebSocketsPerAccount,
 		WSHandshakesPerMinute: cfg.Security.WSHandshakesPerMinute, CursorUpdatesPerMinute: cfg.Security.CursorUpdatesPerMinute,
 		SendRequestsPerMinute: cfg.Security.SendRequestsPerMinute, SendRequestsPerIPMinute: cfg.Security.SendRequestsPerIPMinute, MaxPendingSends: cfg.Security.MaxPendingSends,
 	}}, queries, accounts, translator, bridge)

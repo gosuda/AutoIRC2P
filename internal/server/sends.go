@@ -106,7 +106,7 @@ func sendError(w http.ResponseWriter, status int, code string, row *store.SendRe
 var requestIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{16,80}$`)
 
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {
-	if !s.sendIPs.allow(s.clientIP(r), time.Now(), s.cfg.Security.SendRequestsPerIPMinute, 10) {
+	if !s.cfg.Security.DisableRateLimits && !s.sendIPs.allow(s.clientIP(r), time.Now(), s.cfg.Security.SendRequestsPerIPMinute, 10) {
 		rateLimited(w)
 		return
 	}
@@ -115,7 +115,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		sendError(w, 401, "login_required", nil)
 		return
 	}
-	if !s.sendAccounts.allow(stringID(user.ID), time.Now(), s.cfg.Security.SendRequestsPerMinute, 5) {
+	if !s.cfg.Security.DisableRateLimits && !s.sendAccounts.allow(stringID(user.ID), time.Now(), s.cfg.Security.SendRequestsPerMinute, 5) {
 		rateLimited(w)
 		return
 	}

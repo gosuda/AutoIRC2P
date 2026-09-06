@@ -170,7 +170,7 @@ func (s *Server) markRead(ctx context.Context, sub *subscription, room string, i
 	}
 	sub.cursorMu.Lock()
 	defer sub.cursorMu.Unlock()
-	if !sub.cursorBudget.allow(time.Now(), s.cfg.Security.CursorUpdatesPerMinute, 30) {
+	if !s.cfg.Security.DisableRateLimits && !sub.cursorBudget.allow(time.Now(), s.cfg.Security.CursorUpdatesPerMinute, 30) {
 		return errCursorRateLimited
 	}
 	bounded, err := s.q.BoundReadCursor(ctx, store.BoundReadCursorParams{Room: room, ID: id})

@@ -45,6 +45,43 @@ func TestClientIPHonorsOnlyTrustedProxyChain(t *testing.T) {
 	}
 }
 
+func TestRequestRateLimitsCanBeDisabled(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, method, path string
+			authenticated      bool
+			burst, status      int
+		}{
+			{"login", http.MethodPost, "/api/auth/login", false, 10, http.StatusBadRequest},
+			{"guest send", http.MethodPost, "/api/messages", false, 10, http.StatusUnauthorized},
+			{"account send", http.MethodPost, "/api/messages", true, 5, http.StatusBadRequest},
+			{"WebSocket handshake", http.MethodGet, "/api/ws?room=%23unknown", false, 10, http.StatusBadRequest},
+		} {
+			t.Run(fmt.Sprintf("%s/disabled=%t", tc.name, disabled), func(t *testing.T) {
+				app, _, token := lifecycleServer(t, &lifecycleBridge{})
+				app.cfg.Security.DisableRateLimits = disabled
+				handler := app.Handler()
+				for i := range tc.burst + 1 {
+					request := httptest.NewRequest(tc.method, "https://chat.example"+tc.path, nil)
+					request.Header.Set("Origin", "https://chat.example")
+					if tc.authenticated {
+						request.AddCookie(&http.Cookie{Name: "session", Value: token})
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					want := tc.status
+					if !disabled && i == tc.burst {
+						want = http.StatusTooManyRequests
+					}
+					if response.Code != want {
+						t.Fatalf("request %d: status=%d, want %d: %s", i+1, response.Code, want, response.Body.String())
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestAuthenticationLimitCannotBeBypassedByForwardedSpoof(t *testing.T) {
 	for _, trusted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("trusted=%t", trusted), func(t *testing.T) {
@@ -83,6 +120,7 @@ func TestSocketAdmissionLimitsReleaseIndependently(t *testing.T) {
 		{"global", SecurityConfig{MaxWebSockets: 1}, "192.0.2.2", 2},
 		{"IP", SecurityConfig{MaxWebSocketsPerIP: 1}, "192.0.2.1", 2},
 		{"account", SecurityConfig{MaxWebSocketsPerAccount: 1}, "192.0.2.2", 1},
+		{"global with rates disabled", SecurityConfig{MaxWebSockets: 1, DisableRateLimits: true}, "192.0.2.2", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var admission socketAdmission
@@ -179,18 +217,34 @@ func TestFailedAccountAcquisitionReleasesWebSocketAdmission(t *testing.T) {
 	}
 }
 
-func TestCursorFloodIsDeniedBeforeDatabaseAccess(t *testing.T) {
-	app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
-	app.cfg.Security.CursorUpdatesPerMinute = 1
-	sub := &subscription{room: "#one", out: make(chan frame, 32), done: make(chan struct{}), cursors: make(map[string]int64)}
-	for range 30 {
-		if err := app.markRead(t.Context(), sub, "#one", 0); err != nil {
-			t.Fatal(err)
-		}
-	}
-	app.q = nil
-	if err := app.markRead(t.Context(), sub, "#one", 0); !errors.Is(err, errCursorRateLimited) {
-		t.Fatalf("flood error = %v, want cursor rate limit", err)
+func TestCursorRateLimitCanBeDisabled(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disabled=%t", disabled), func(t *testing.T) {
+			app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
+			app.cfg.Security.DisableRateLimits = disabled
+			app.cfg.Security.CursorUpdatesPerMinute = 1
+			sub := &subscription{room: "#one", out: make(chan frame, 1), done: make(chan struct{}), cursors: make(map[string]int64)}
+			for i := range 31 {
+				err := app.markRead(t.Context(), sub, "#one", 0)
+				if !disabled && i == 30 {
+					if !errors.Is(err, errCursorRateLimited) {
+						t.Fatalf("cursor flood error = %v, want rate limit", err)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("cursor update %d: %v", i+1, err)
+				}
+				select {
+				case update := <-sub.out:
+					if update.Type != "room" || update.Room == nil || update.Room.Name != "#one" {
+						t.Fatalf("unexpected cursor response: %+v", update)
+					}
+				default:
+					t.Fatal("cursor update did not return room state")
+				}
+			}
+		})
 	}
 }
 
@@ -202,6 +256,7 @@ func TestPendingSendCancellationReleasesCapacityAndIRCLease(t *testing.T) {
 	}}
 	app, _, token := lifecycleServer(t, bridge)
 	app.cfg.Security.MaxPendingSends = 1
+	app.cfg.Security.DisableRateLimits = true
 	started := make(chan struct{})
 	app.translator = translationFunc(func(ctx context.Context, _, _ string) (string, error) {
 		close(started)

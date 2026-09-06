@@ -8,9 +8,10 @@ import (
 	"time"
 )
 
-// Zero limits select production defaults; forwarded headers are ignored unless the socket peer is trusted.
+// Zero numeric limits select production defaults; forwarded headers require a trusted socket peer.
 type SecurityConfig struct {
 	TrustedProxies          []netip.Prefix
+	DisableRateLimits       bool
 	MaxWebSockets           int
 	MaxWebSocketsPerIP      int
 	MaxWebSocketsPerAccount int

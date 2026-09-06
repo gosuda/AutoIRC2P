@@ -17,15 +17,15 @@ func (c *Config) loadPortalite() error {
 		return fmt.Errorf("PORTALITE must be 0 or 1")
 	}
 	c.PortaliteName = os.Getenv("PORTALITE_NAME")
-	name := c.PortaliteName
+	name := strings.ToLower(c.PortaliteName)
 	if len(name) > 63 || strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") {
-		return fmt.Errorf("PORTALITE_NAME must be a lowercase DNS label of 1–63 characters")
+		return fmt.Errorf("PORTALITE_NAME must be a DNS label of 1–63 characters")
 	}
 	for _, char := range name {
 		letter := char >= 'a' && char <= 'z'
 		digit := char >= '0' && char <= '9'
 		if !letter && !digit && char != '-' {
-			return fmt.Errorf("PORTALITE_NAME must contain only lowercase ASCII letters, digits and interior hyphens")
+			return fmt.Errorf("PORTALITE_NAME must contain only ASCII letters, digits and interior hyphens")
 		}
 	}
 	c.PortaliteRelays = portalite.DefaultRelays()

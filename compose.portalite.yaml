@@ -12,7 +12,7 @@ services:
       DATA_DIR: /data
       WEB_DIR: /app/web
       IVNP_CONFIG: /data/ivnp.conf
-      TRUSTED_PROXY_CIDRS: ""
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     volumes:
       - app_data:/data
     read_only: true

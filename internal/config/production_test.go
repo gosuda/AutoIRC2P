@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/netip"
 	"testing"
 )
 
@@ -12,6 +13,7 @@ func productionTestEnv(t *testing.T) {
 		"HTTP_BODY_TIMEOUT", "HTTP_WRITE_TIMEOUT", "IRC_ACCOUNT_IDLE_GRACE", "CHAT_RETENTION", "TRANSLATION_RETENTION", "SEND_PAYLOAD_RETENTION", "RETENTION_INTERVAL", "RETENTION_BATCH_SIZE",
 		"TRANSLATION_INTERVAL", "TRANSLATION_COOLDOWN", "IRC_IDLE_TIMEOUT", "IRC_PONG_TIMEOUT",
 		"PORTALITE", "PORTALITE_NAME", "PORTALITE_RELAYS",
+		"RATE_LIMIT_ENABLED",
 	} {
 		t.Setenv(name, "")
 	}
@@ -25,9 +27,8 @@ func TestProductionSettingsRejectUnsafeOverrides(t *testing.T) {
 		name   string
 		values map[string]string
 	}{
-		{"trust all IPv4", map[string]string{"TRUSTED_PROXY_CIDRS": "0.0.0.0/0"}},
-		{"trust all IPv6", map[string]string{"TRUSTED_PROXY_CIDRS": "::/0"}},
 		{"malformed proxy", map[string]string{"TRUSTED_PROXY_CIDRS": "127.0.0.1"}},
+		{"invalid rate switch", map[string]string{"RATE_LIMIT_ENABLED": "false"}},
 		{"disabled admission", map[string]string{"WS_MAX_CONNECTIONS": "0"}},
 		{"negative body timeout", map[string]string{"HTTP_BODY_TIMEOUT": "-1s"}},
 		{"write deadline interrupts sends", map[string]string{"HTTP_WRITE_TIMEOUT": "20s"}},
@@ -57,5 +58,24 @@ func TestMappedTrustedProxyMatchesIPv4Peer(t *testing.T) {
 	}
 	if len(cfg.Security.TrustedProxies) != 1 || cfg.Security.TrustedProxies[0].String() != "192.0.2.4/32" {
 		t.Fatalf("proxy range was not normalized: %v", cfg.Security.TrustedProxies)
+	}
+}
+
+func TestExplicitTrustAllWorksInBothListenerModes(t *testing.T) {
+	for _, mode := range []string{"0", "1"} {
+		t.Run("portalite="+mode, func(t *testing.T) {
+			productionTestEnv(t)
+			t.Setenv("PORTALITE", mode)
+			t.Setenv("TRUSTED_PROXY_CIDRS", "0.0.0.0/0,::/0,::ffff:0:0/96")
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, address := range []string{"203.0.113.8", "2001:db8::8", "198.51.100.8"} {
+				if !cfg.Security.TrustedProxies[i].Contains(netip.MustParseAddr(address)) {
+					t.Errorf("explicit trust-all range %d does not trust %s", i, address)
+				}
+			}
+		})
 	}
 }

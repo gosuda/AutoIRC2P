@@ -13,7 +13,7 @@ import (
 
 func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
-	if !s.handshakes.allow(ip, time.Now(), s.cfg.Security.WSHandshakesPerMinute, 10) {
+	if !s.cfg.Security.DisableRateLimits && !s.handshakes.allow(ip, time.Now(), s.cfg.Security.WSHandshakesPerMinute, 10) {
 		rateLimited(w)
 		return
 	}
