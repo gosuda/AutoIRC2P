@@ -27,19 +27,19 @@ SELECT wire_language FROM messages WHERE room = ? AND service = 0 ORDER BY id DE
 -- name: CachedTranslation :one
 SELECT translated FROM translations WHERE cache_key = ?;
 -- name: SaveTranslation :exec
-INSERT INTO translations (cache_key,translated) VALUES (?,?) ON CONFLICT(cache_key) DO UPDATE SET translated = excluded.translated;
+INSERT INTO translations (cache_key,translated,created_at) VALUES (?,?,CAST(unixepoch('subsec') * 1000 AS INTEGER)) ON CONFLICT(cache_key) DO UPDATE SET translated = excluded.translated, created_at = excluded.created_at;
 -- name: ClaimSend :execrows
 INSERT INTO send_requests (user_id,request_id,room,nick,original,original_mode,state,created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING;
 -- name: GetSend :one
 SELECT * FROM send_requests WHERE user_id = ? AND request_id = ?;
 -- name: ListSends :many
-SELECT * FROM send_requests WHERE user_id = ? AND room = ? AND (state = 'confirmed' OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50;
+SELECT * FROM send_requests WHERE user_id = ? AND room = ? AND payload_purged = 0 AND (state = 'confirmed' OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50;
 -- name: FinishSend :one
 UPDATE send_requests SET state = ?, error_code = ?, updated_at = ?, expires_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING *;
 -- name: PrepareSend :one
 UPDATE send_requests SET wire_text = ?, state = 'sending', updated_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING *;
 -- name: PendingEcho :one
-SELECT * FROM send_requests WHERE room = ? AND nick = ? COLLATE NOCASE AND wire_text = ? AND echo_consumed = 0 AND state IN ('sending','awaiting_echo','unconfirmed') AND created_at >= ? ORDER BY created_at,rowid LIMIT 1;
+SELECT * FROM send_requests WHERE room = ? AND nick = ? COLLATE NOCASE AND wire_text = ? AND payload_purged = 0 AND echo_consumed = 0 AND state IN ('sending','awaiting_echo','unconfirmed') AND created_at >= ? ORDER BY created_at,rowid LIMIT 1;
 -- name: ConsumeEcho :one
 UPDATE send_requests SET echo_consumed = 1, message_id = ?, state = 'confirmed', error_code = '', updated_at = ? WHERE user_id = ? AND request_id = ? RETURNING *;
 -- name: ExpireEchoes :many
@@ -52,3 +52,11 @@ SELECT CAST(COALESCE(MAX(id),0) AS INTEGER) FROM messages WHERE room = ?;
 SELECT CAST(COALESCE(MAX(id),0) AS INTEGER) FROM messages WHERE room = ? AND id <= ?;
 -- name: UnreadMessages :one
 SELECT COUNT(*) FROM messages WHERE room = ? AND id > ? AND service = 0 AND (sender_user_id = 0 OR sender_user_id != ?);
+-- name: PruneMessagesBatch :execrows
+DELETE FROM messages WHERE id IN (SELECT m.id FROM messages AS m WHERE m.created_at < ? ORDER BY m.created_at LIMIT ?);
+-- name: PruneTranslationsBatch :execrows
+DELETE FROM translations WHERE cache_key IN (SELECT t.cache_key FROM translations AS t WHERE t.created_at < ? ORDER BY t.created_at LIMIT ?);
+-- name: PurgeSendPayloadsBatch :execrows
+UPDATE send_requests SET payload_purged = 1, room = '', nick = '', original = '', wire_text = '' WHERE rowid IN (SELECT s.rowid FROM send_requests AS s WHERE s.payload_purged = 0 AND s.state IN ('confirmed','failed','unconfirmed') AND s.updated_at < ? AND s.created_at < ? ORDER BY s.updated_at LIMIT ?);
+-- name: BackupUserSecrets :many
+SELECT id,email,irc_password,identity_keys FROM users WHERE id > ? ORDER BY id LIMIT 100;

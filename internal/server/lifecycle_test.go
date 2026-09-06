@@ -22,8 +22,11 @@ type lifecycleBridge struct {
 	send  func(context.Context, int64, string, string) error
 }
 
-func (b *lifecycleBridge) Connect(context.Context, irc.Account) error  { return nil }
-func (b *lifecycleBridge) RoomState(int64, string) irc.MembershipState { return b.state }
+func (b *lifecycleBridge) Acquire(context.Context, irc.Account) (func(), error) {
+	return func() {}, nil
+}
+func (b *lifecycleBridge) Retain(context.Context, int64) (func(), error) { return func() {}, nil }
+func (b *lifecycleBridge) RoomState(int64, string) irc.MembershipState   { return b.state }
 func (b *lifecycleBridge) Send(ctx context.Context, id int64, room, text string) error {
 	return b.send(ctx, id, room, text)
 }

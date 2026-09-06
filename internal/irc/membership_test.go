@@ -18,7 +18,7 @@ func TestRoomReadinessRequiresJoinAndTracksRemoval(t *testing.T) {
 			t.Fatal(err)
 		}
 		events := make(chan Event, 32)
-		account := &accountConnection{account: Account{ID: 1, Nick: "alice"}, joined: make(map[string]bool)}
+		account := &accountConnection{ctx: ctx, account: Account{ID: 1, Nick: "alice"}, joined: make(map[string]bool)}
 		manager := &Manager{ctx: ctx, started: true, cfg: Config{Rooms: []string{"#first", "#second"}}, rooms: map[string]string{"#first": "#first", "#second": "#second"}, accounts: map[int64]*accountConnection{1: account}, onEvent: func(event Event) { events <- event }}
 		done := make(chan error, 1)
 		go func() { done <- manager.serveConnection(account, &wireConnection{Conn: client}) }()

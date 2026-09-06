@@ -25,20 +25,21 @@ type Observer struct {
 }
 
 type SendRequest struct {
-	UserID       int64  `json:"user_id"`
-	RequestID    string `json:"request_id"`
-	State        string `json:"state"`
-	MessageID    int64  `json:"message_id"`
-	Room         string `json:"room"`
-	Nick         string `json:"nick"`
-	Original     string `json:"original"`
-	WireText     string `json:"wire_text"`
-	CreatedAt    int64  `json:"created_at"`
-	EchoConsumed int64  `json:"echo_consumed"`
-	OriginalMode int64  `json:"original_mode"`
-	ErrorCode    string `json:"error_code"`
-	UpdatedAt    int64  `json:"updated_at"`
-	ExpiresAt    int64  `json:"expires_at"`
+	UserID        int64  `json:"user_id"`
+	RequestID     string `json:"request_id"`
+	State         string `json:"state"`
+	MessageID     int64  `json:"message_id"`
+	Room          string `json:"room"`
+	Nick          string `json:"nick"`
+	Original      string `json:"original"`
+	WireText      string `json:"wire_text"`
+	CreatedAt     int64  `json:"created_at"`
+	EchoConsumed  int64  `json:"echo_consumed"`
+	OriginalMode  int64  `json:"original_mode"`
+	ErrorCode     string `json:"error_code"`
+	UpdatedAt     int64  `json:"updated_at"`
+	ExpiresAt     int64  `json:"expires_at"`
+	PayloadPurged int64  `json:"payload_purged"`
 }
 
 type Session struct {
@@ -50,6 +51,7 @@ type Session struct {
 type Translation struct {
 	CacheKey   string `json:"cache_key"`
 	Translated string `json:"translated"`
+	CreatedAt  int64  `json:"created_at"`
 }
 
 type User struct {

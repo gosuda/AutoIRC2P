@@ -141,6 +141,8 @@ export function subscribeRoom(options: {
   let socket: WebSocket | undefined;
   let verifiedSocket: WebSocket | undefined;
   let retryTimer: number | undefined;
+  let readTimer: number | undefined;
+  const pendingReads = new Map<string, number>();
   let stopped = false;
   let retries = 0;
   let historyGeneration = 0;
@@ -196,8 +198,25 @@ export function subscribeRoom(options: {
     }
   }
 
+  function flushRead() {
+    readTimer = undefined;
+    if (stopped || socket?.readyState !== WebSocket.OPEN || socket !== verifiedSocket) {
+      pendingReads.clear();
+      return;
+    }
+    const next = pendingReads.entries().next().value;
+    if (next) {
+      const [room, messageId] = next;
+      pendingReads.delete(room);
+      socket.send(JSON.stringify({ type: 'read', room, messageId }));
+    }
+    if (pendingReads.size > 0) readTimer = window.setTimeout(flushRead, 500);
+  }
+
   function read(room: string, messageId: number) {
-    if (socket?.readyState === WebSocket.OPEN && socket === verifiedSocket) socket.send(JSON.stringify({ type: 'read', room, messageId }));
+    if (socket?.readyState !== WebSocket.OPEN || socket !== verifiedSocket) return;
+    pendingReads.set(room, Math.max(messageId, pendingReads.get(room) ?? 0));
+    if (readTimer === undefined) readTimer = window.setTimeout(flushRead, 500);
   }
 
   function connect() {
@@ -251,6 +270,9 @@ export function subscribeRoom(options: {
     current.onclose = () => {
       if (stopped || socket !== current) return;
       verifiedSocket = undefined;
+      clearTimeout(readTimer);
+      readTimer = undefined;
+      pendingReads.clear();
       options.onSubscription('reconnecting');
       retryTimer = window.setTimeout(connect, Math.min(30000, 1000 * 2 ** Math.min(retries++, 5)));
     };
@@ -264,6 +286,8 @@ export function subscribeRoom(options: {
       stopped = true;
       controller.abort();
       clearTimeout(retryTimer);
+      clearTimeout(readTimer);
+      pendingReads.clear();
       if (socket) {
         socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
         socket.close();

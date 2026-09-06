@@ -20,7 +20,7 @@ func TestObserverReceivesAuthenticatedAccountsWithoutSendingChannelMessages(t *t
 	}
 	events := make(chan Event, 16)
 	manager := &Manager{ctx: ctx, cfg: Config{Rooms: []string{"#i2p"}}, rooms: map[string]string{"#i2p": "#i2p"}, onEvent: func(event Event) { events <- event }}
-	state := &accountConnection{account: Account{ID: 0, Nick: "observer"}, joined: make(map[string]bool)}
+	state := &accountConnection{ctx: ctx, account: Account{ID: 0, Nick: "observer"}, joined: make(map[string]bool)}
 	done := make(chan error, 1)
 	go func() { done <- manager.serveConnection(state, &wireConnection{Conn: client}) }()
 	t.Cleanup(func() {
@@ -95,7 +95,7 @@ func TestAuthenticatedObserverCannotSendChat(t *testing.T) {
 	account.Password = "local-only:!@"
 	events := make(chan Event, 32)
 	manager := &Manager{ctx: ctx, cfg: Config{Rooms: []string{"#test"}}, rooms: map[string]string{"#test": "#test"}, onEvent: func(event Event) { events <- event }}
-	state := &accountConnection{account: account, joined: make(map[string]bool)}
+	state := &accountConnection{ctx: ctx, account: account, joined: make(map[string]bool)}
 	done := make(chan error, 1)
 	go func() { done <- manager.serveConnection(state, &wireConnection{Conn: client}) }()
 	defer func() {
@@ -173,7 +173,7 @@ func TestJoinPacingKeepsPongResponsiveAndCancelsPendingRooms(t *testing.T) {
 			t.Fatal(err)
 		}
 		manager := &Manager{ctx: ctx, cfg: Config{Rooms: []string{"#first", "#second", "#third"}}, onEvent: func(Event) {}}
-		state := &accountConnection{account: Account{Nick: "reader"}, joined: make(map[string]bool)}
+		state := &accountConnection{ctx: ctx, account: Account{Nick: "reader"}, joined: make(map[string]bool)}
 		done := make(chan error, 1)
 		go func() { done <- manager.serveConnection(state, &wireConnection{Conn: client}) }()
 		defer func() {
@@ -240,7 +240,7 @@ func TestI2PKeepaliveToleratesDelayedPingAndPong(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				client, server := net.Pipe()
 				manager := &Manager{ctx: ctx, cfg: Config{IdleTimeout: tc.idle, PongTimeout: tc.pong}, onEvent: func(Event) {}}
-				state := &accountConnection{account: Account{Nick: "reader"}, joined: make(map[string]bool)}
+				state := &accountConnection{ctx: ctx, account: Account{Nick: "reader"}, joined: make(map[string]bool)}
 				done := make(chan error, 1)
 				go func() { done <- manager.serveConnection(state, &wireConnection{Conn: client}) }()
 				defer func() {

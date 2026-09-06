@@ -17,8 +17,9 @@ func (m *Manager) RoomState(accountID int64, room string) MembershipState {
 	m.mu.Lock()
 	state := m.accounts[accountID]
 	closed, started, lifetime := m.closed, m.started, m.ctx
+	stopping := state != nil && state.closing
 	m.mu.Unlock()
-	if closed {
+	if closed || stopping {
 		return RoomUnavailable
 	}
 	if lifetime != nil && lifetime.Err() != nil {
@@ -26,6 +27,9 @@ func (m *Manager) RoomState(accountID int64, room string) MembershipState {
 	}
 	if !started || state == nil {
 		return RoomPreparing
+	}
+	if state.ctx.Err() != nil {
+		return RoomUnavailable
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()

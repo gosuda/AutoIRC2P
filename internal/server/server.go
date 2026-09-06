@@ -20,7 +20,8 @@ import (
 )
 
 type Bridge interface {
-	Connect(context.Context, irc.Account) error
+	Acquire(context.Context, irc.Account) (func(), error)
+	Retain(context.Context, int64) (func(), error)
 	Send(context.Context, int64, string, string) error
 	RoomState(int64, string) irc.MembershipState
 }
@@ -31,6 +32,7 @@ type Config struct {
 	Origin, WebDir string
 	Rooms          []string
 	SecureCookies  bool
+	Security       SecurityConfig
 }
 type Message struct {
 	ID               int64  `json:"id"`
@@ -64,13 +66,14 @@ type network struct {
 	Detail string `json:"detail"`
 }
 type subscription struct {
-	room, lang string
-	userID     int64
-	out        chan frame
-	done       chan struct{}
-	once       sync.Once
-	cursorMu   sync.Mutex
-	cursors    map[string]int64
+	room, lang   string
+	userID       int64
+	out          chan frame
+	done         chan struct{}
+	once         sync.Once
+	cursorMu     sync.Mutex
+	cursors      map[string]int64
+	cursorBudget tokenBucket
 }
 
 func (s *subscription) close() { s.once.Do(func() { close(s.done) }) }
@@ -95,15 +98,21 @@ type Server struct {
 	authMu        sync.Mutex
 	authAttempts  map[string]authWindow
 	serviceID     int64
+	admission     socketAdmission
+	handshakes    requestLimiter
+	sendAccounts  requestLimiter
+	sendIPs       requestLimiter
 	lifetime      context.Context
 	cancel        context.CancelFunc
 	sendMu        sync.Mutex
 	sending       sync.WaitGroup
+	pendingSends  int
 	stopping      bool
 	outgoingMu    sync.Mutex
 }
 
 func New(cfg Config, q *store.Queries, a *auth.Service, tr Translator, bridge Bridge) *Server {
+	cfg.Security = cfg.Security.normalized()
 	lifetime, cancel := context.WithCancel(context.Background())
 	return &Server{cfg: cfg, q: q, auth: a, translator: tr, bridge: bridge, subscribers: make(map[*subscription]struct{}), net: network{State: "connecting", Detail: "Building I2P tunnels"}, accountStates: make(map[int64]network), jobs: make(chan translationJob, 1024), queued: make(map[string]struct{}), events: make(chan irc.Event, 1024), lifetime: lifetime, cancel: cancel}
 }
@@ -165,6 +174,8 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		s.mu.Lock()
 		if event.AccountID == 0 {
 			s.net = status
+		} else if event.State == "stopped" {
+			delete(s.accountStates, event.AccountID)
 		} else {
 			s.accountStates[event.AccountID] = status
 		}

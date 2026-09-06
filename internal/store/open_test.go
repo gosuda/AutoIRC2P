@@ -3,18 +3,21 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestVersionOneMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.sqlite")
-	legacy, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = legacy.Exec(`
+func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("version%d", version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "legacy.sqlite")
+			legacy, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = legacy.Exec(`
  CREATE TABLE users (id INTEGER PRIMARY KEY,email TEXT NOT NULL UNIQUE,nick TEXT NOT NULL UNIQUE COLLATE NOCASE,password_salt BLOB NOT NULL,password_hash BLOB NOT NULL,irc_password BLOB NOT NULL,identity_keys BLOB NOT NULL,identity_address TEXT NOT NULL,irc_registered INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);
  CREATE TABLE sessions (token_hash BLOB PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL);
  CREATE TABLE observer (id INTEGER PRIMARY KEY,nick TEXT NOT NULL,identity_keys BLOB NOT NULL,identity_address TEXT NOT NULL);
@@ -29,53 +32,64 @@ func TestVersionOneMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
  INSERT INTO send_requests VALUES(1,'confirmed-request','sent',7,'#one','alice','original','wire',1000,1);
  INSERT INTO send_requests VALUES(1,'interrupted-request','sending',0,'#one','alice','pending','pending',1000,0);
  PRAGMA user_version=1;`)
-	if err != nil {
-		t.Fatal(errors.Join(err, legacy.Close()))
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, q, err := NewSQLite(t.Context(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	rows, err := q.Messages(t.Context(), MessagesParams{Room: "#one", ID: 8})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 || rows[0].ID != 7 || rows[0].Original != "original" || rows[0].SenderUserID != 1 || rows[0].SenderRequestID != "confirmed-request" {
-		t.Fatalf("migrated history: %+v", rows)
-	}
-	confirmed, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "confirmed-request"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if confirmed.State != "confirmed" || confirmed.MessageID != 7 {
-		t.Fatalf("lost echo confirmation: %+v", confirmed)
-	}
-	pending, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "interrupted-request"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pending.State != "unconfirmed" || pending.ErrorCode != "interrupted" {
-		t.Fatalf("interrupted write misrepresented: %+v", pending)
-	}
-	cached, err := q.GetTranslation(t.Context(), "cache-key")
-	if err != nil || cached != "cached translation" {
-		t.Fatalf("cache lost: %q %v", cached, err)
-	}
-	user, err := q.SessionUser(t.Context(), SessionUserParams{TokenHash: []byte{0xaa}, ExpiresAt: 1000})
-	if err != nil || user.Email != "alice@example.org" {
-		t.Fatalf("session lost: %+v %v", user, err)
-	}
-	observer, err := q.GetObserver(t.Context())
-	if err != nil || observer.IdentityAddress != "observer.b32.i2p" {
-		t.Fatalf("observer identity lost: %+v %v", observer, err)
+			if err != nil {
+				t.Fatal(errors.Join(err, legacy.Close()))
+			}
+			if version == 2 {
+				if _, err := legacy.Exec(migration2 + "\nPRAGMA user_version=2;"); err != nil {
+					t.Fatal(errors.Join(err, legacy.Close()))
+				}
+			}
+			if err := legacy.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, q, err := NewSQLite(t.Context(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := db.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			rows, err := q.Messages(t.Context(), MessagesParams{Room: "#one", ID: 8})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].ID != 7 || rows[0].Original != "original" || rows[0].SenderUserID != 1 || rows[0].SenderRequestID != "confirmed-request" {
+				t.Fatalf("migrated history: %+v", rows)
+			}
+			confirmed, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "confirmed-request"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if confirmed.State != "confirmed" || confirmed.MessageID != 7 {
+				t.Fatalf("lost echo confirmation: %+v", confirmed)
+			}
+			pending, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "interrupted-request"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pending.State != "unconfirmed" || pending.ErrorCode != "interrupted" {
+				t.Fatalf("interrupted write misrepresented: %+v", pending)
+			}
+			cached, err := q.GetTranslation(t.Context(), "cache-key")
+			if err != nil || cached != "cached translation" {
+				t.Fatalf("cache lost: %q %v", cached, err)
+			}
+			user, err := q.SessionUser(t.Context(), SessionUserParams{TokenHash: []byte{0xaa}, ExpiresAt: 1000})
+			if err != nil || user.Email != "alice@example.org" {
+				t.Fatalf("session lost: %+v %v", user, err)
+			}
+			observer, err := q.GetObserver(t.Context())
+			if err != nil || observer.IdentityAddress != "observer.b32.i2p" {
+				t.Fatalf("observer identity lost: %+v %v", observer, err)
+			}
+			retained, err := q.Prune(t.Context(), time.Now(), RetentionPolicy{Translations: time.Hour, BatchSize: 1})
+			if err != nil || retained.TranslationsDeleted != 0 {
+				t.Fatalf("migrated cache prematurely pruned: %+v %v", retained, err)
+			}
+		})
 	}
 }
 

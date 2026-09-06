@@ -18,6 +18,11 @@ var schema string
 //go:embed migration2.sql
 var migration2 string
 
+//go:embed migration3.sql
+var migration3 string
+
+const schemaVersion = 3
+
 func NewSQLite(ctx context.Context, path string) (*sql.DB, *Queries, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, nil, err
@@ -42,19 +47,21 @@ func NewSQLite(ctx context.Context, path string) (*sql.DB, *Queries, error) {
 	if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fail(err)
 	}
-	if version > 2 {
+	if version < 0 || version > schemaVersion {
 		return fail(fmt.Errorf("unsupported database version %d", version))
 	}
-	if version < 2 {
+	if version < schemaVersion {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return fail(err)
 		}
 		migration := schema
 		if version == 1 {
-			migration = migration2
+			migration = migration2 + "\n" + migration3
+		} else if version == 2 {
+			migration = migration3
 		}
-		if _, err = tx.ExecContext(ctx, migration+"\nPRAGMA user_version=2;"); err != nil {
+		if _, err = tx.ExecContext(ctx, migration+"\nPRAGMA user_version=3;"); err != nil {
 			return fail(errors.Join(err, tx.Rollback()))
 		}
 		if err = tx.Commit(); err != nil {

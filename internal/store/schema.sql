@@ -23,7 +23,7 @@ CREATE TABLE observer (
  identity_address TEXT NOT NULL
 );
 CREATE TABLE messages (
- id INTEGER PRIMARY KEY,
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
  room TEXT NOT NULL,
  nick TEXT NOT NULL,
  original TEXT NOT NULL,
@@ -37,7 +37,8 @@ CREATE TABLE messages (
 CREATE INDEX messages_room_id ON messages(room, id DESC);
 CREATE TABLE translations (
  cache_key TEXT PRIMARY KEY,
- translated TEXT NOT NULL
+ translated TEXT NOT NULL,
+ created_at INTEGER NOT NULL
 );
 CREATE TABLE send_requests (
  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -54,7 +55,11 @@ CREATE TABLE send_requests (
  error_code TEXT NOT NULL DEFAULT '',
  updated_at INTEGER NOT NULL DEFAULT 0,
  expires_at INTEGER NOT NULL DEFAULT 0,
+ payload_purged INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY (user_id, request_id)
 );
 CREATE INDEX send_requests_echo ON send_requests(room,nick COLLATE NOCASE,wire_text,created_at);
 CREATE INDEX send_requests_user_room ON send_requests(user_id,room,created_at DESC);
+CREATE INDEX messages_retention ON messages(created_at);
+CREATE INDEX translations_retention ON translations(created_at);
+CREATE INDEX send_requests_retention ON send_requests(updated_at) WHERE payload_purged = 0 AND state IN ('confirmed','failed','unconfirmed');

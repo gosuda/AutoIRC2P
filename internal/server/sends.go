@@ -88,6 +88,10 @@ func (s *Server) sendStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "send status unavailable")
 		return
 	}
+	if row.PayloadPurged != 0 {
+		sendError(w, 410, "request_expired", nil)
+		return
+	}
 	writeJSON(w, 200, map[string]any{"send": outgoingFrom(row)})
 }
 
@@ -102,11 +106,43 @@ func sendError(w http.ResponseWriter, status int, code string, row *store.SendRe
 var requestIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{16,80}$`)
 
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {
+	if !s.sendIPs.allow(s.clientIP(r), time.Now(), s.cfg.Security.SendRequestsPerIPMinute, 10) {
+		rateLimited(w)
+		return
+	}
 	user, err := s.currentUser(r)
 	if err != nil {
 		sendError(w, 401, "login_required", nil)
 		return
 	}
+	if !s.sendAccounts.allow(stringID(user.ID), time.Now(), s.cfg.Security.SendRequestsPerMinute, 5) {
+		rateLimited(w)
+		return
+	}
+	s.sendMu.Lock()
+	if s.stopping {
+		s.sendMu.Unlock()
+		sendError(w, 503, "not_ready", nil)
+		return
+	}
+	if s.pendingSends >= s.cfg.Security.MaxPendingSends {
+		s.sendMu.Unlock()
+		rateLimited(w)
+		return
+	}
+	s.pendingSends++
+	s.sending.Add(1)
+	s.sendMu.Unlock()
+	defer func() {
+		s.sendMu.Lock()
+		s.pendingSends--
+		s.sendMu.Unlock()
+		s.sending.Done()
+	}()
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	stop := context.AfterFunc(s.lifetime, cancel)
+	defer func() { stop(); cancel() }()
+	r = r.WithContext(ctx)
 	var body struct {
 		Room      string `json:"room"`
 		Text      string `json:"text"`
@@ -124,6 +160,10 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	}
 	previous, err := s.q.GetSend(r.Context(), key)
 	if err == nil {
+		if previous.PayloadPurged != 0 {
+			sendError(w, 409, "request_expired", nil)
+			return
+		}
 		if previous.Room != body.Room || previous.Original != body.Text || previous.OriginalMode != originalMode {
 			sendError(w, 409, "request_conflict", nil)
 			return
@@ -140,18 +180,12 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		sendError(w, 409, "not_ready", nil)
 		return
 	}
-	s.sendMu.Lock()
-	if s.stopping {
-		s.sendMu.Unlock()
-		sendError(w, 503, "not_ready", nil)
+	releaseAccount, err := s.bridge.Retain(ctx, user.ID)
+	if err != nil {
+		sendError(w, 409, "not_ready", nil)
 		return
 	}
-	s.sending.Add(1)
-	s.sendMu.Unlock()
-	defer s.sending.Done()
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-	stop := context.AfterFunc(s.lifetime, cancel)
-	defer func() { stop(); cancel() }()
+	defer releaseAccount()
 	target := ""
 	if !body.Original {
 		langs, err := s.q.RoomLanguages(ctx, body.Room)
@@ -182,6 +216,10 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if claimed == 0 {
+		if row.PayloadPurged != 0 {
+			sendError(w, 409, "request_expired", nil)
+			return
+		}
 		if row.Room != body.Room || row.Original != body.Text || row.OriginalMode != originalMode {
 			sendError(w, 409, "request_conflict", nil)
 			return

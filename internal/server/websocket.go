@@ -1,14 +1,22 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/gosuda/AutoIRC2P/internal/irc"
 )
 
 func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
+	ip := s.clientIP(r)
+	if !s.handshakes.allow(ip, time.Now(), s.cfg.Security.WSHandshakesPerMinute, 10) {
+		rateLimited(w)
+		return
+	}
 	room := r.URL.Query().Get("room")
 	if !s.roomAllowed(room) {
 		writeError(w, 400, "unknown room")
@@ -23,18 +31,42 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	sub := &subscription{room: room, lang: language(r), out: make(chan frame, 256), done: make(chan struct{}), cursors: cursors}
-	if user, err := s.currentUser(r); err == nil {
-		sub.userID = user.ID
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(s.lifetime, cancel)
+	defer func() { stop(); cancel() }()
+	user, authErr := s.currentUser(r)
+	var userID int64
+	if authErr == nil {
+		userID = user.ID
+	}
+	releaseSlot, admitted := s.admission.acquire(ip, userID, s.cfg.Security)
+	if !admitted {
+		rateLimited(w)
+		return
+	}
+	defer releaseSlot()
+	if userID > 0 {
 		account, err := s.auth.Account(user)
 		if err != nil {
 			writeError(w, 500, "identity unavailable")
 			return
 		}
-		if err = s.bridge.Connect(r.Context(), account); err != nil {
-			slog.Debug("account connection unavailable", "error", err)
+		releaseAccount, err := s.bridge.Acquire(ctx, account)
+		if err != nil {
+			if errors.Is(err, irc.ErrAccountCapacity) {
+				rateLimited(w)
+			} else {
+				writeError(w, 503, "account connection unavailable")
+			}
+			return
 		}
+		defer releaseAccount()
 	}
+	if ctx.Err() != nil {
+		writeError(w, 503, "connection interrupted")
+		return
+	}
+	sub := &subscription{userID: userID, room: room, lang: language(r), out: make(chan frame, 256), done: make(chan struct{}), cursors: cursors}
 	upgrader := websocket.Upgrader{CheckOrigin: s.sameOrigin, HandshakeTimeout: 10 * time.Second}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -51,7 +83,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.subscribers, sub); s.mu.Unlock(); sub.close() }()
 	sub.push(frame{Type: "status", State: status.State, Detail: status.Detail})
-	rooms, roomErr := s.allRooms(r.Context(), sub.userID, sub.cursors)
+	rooms, roomErr := s.allRooms(ctx, sub.userID, sub.cursors)
 	if roomErr == nil {
 		sub.push(frame{Type: "rooms", Rooms: rooms})
 	}
@@ -80,12 +112,21 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 			if err := conn.ReadJSON(&request); err != nil {
 				return
 			}
-			if request.Type != "read" || s.markRead(r.Context(), sub, request.Room, request.MessageID) != nil {
+			if request.Type != "read" {
+				return
+			}
+			if err := s.markRead(ctx, sub, request.Room, request.MessageID); err != nil {
+				if errors.Is(err, errCursorRateLimited) {
+					if err := conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "cursor rate exceeded"), time.Now().Add(10*time.Second)); err != nil {
+						slog.Debug("websocket policy close", "error", err)
+					}
+				}
 				return
 			}
 		}
 	}()
 	defer func() {
+		cancel()
 		sub.close()
 		if err := conn.Close(); err != nil {
 			slog.Debug("websocket closed", "error", err)
@@ -96,9 +137,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-r.Context().Done():
-			return
-		case <-s.lifetime.Done():
+		case <-ctx.Done():
 			return
 		case <-sub.done:
 			return

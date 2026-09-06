@@ -1,0 +1,25 @@
+{
+	admin off
+	servers {
+		max_header_size 16KB
+		timeouts {
+			read_header 10s
+			read_body 15s
+			write 150s
+			idle 90s
+		}
+	}
+}
+
+{$PUBLIC_HOST} {
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy {$APP_UPSTREAM:127.0.0.1:8080} {
+		header_up X-Forwarded-For {remote_host}
+		header_up -Forwarded
+		header_up -X-Real-IP
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 150s
+		}
+	}
+}

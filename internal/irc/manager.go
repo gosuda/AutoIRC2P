@@ -22,6 +22,7 @@ var (
 	ErrNotStarted       = errors.New("IRC manager is not started")
 	ErrNotConnected     = errors.New("IRC account has not joined this room")
 	ErrObserverReadOnly = errors.New("observer cannot send messages")
+	ErrAccountCapacity  = errors.New("IRC account capacity reached")
 	errInvalidConfig    = errors.New("IRC requires an I2P server with port, a config path, and configured rooms")
 	errInvalidAccount   = errors.New("IRC account has invalid ID, password, or duplicate identity")
 	errNickUnavailable  = errors.New("nickname is unavailable; choose another nickname or recover it through the IRC network")
@@ -53,32 +54,44 @@ type Config struct {
 	Rooms      []string
 	// Zero selects 20 minutes idle and 2 minutes for PONG writes.
 	IdleTimeout, PongTimeout time.Duration
+	// Zero selects 16 registered accounts and a 2-minute last-release grace.
+	MaxAccounts      int
+	AccountIdleGrace time.Duration
 }
 
 // Manager callbacks run on connection workers and must not call Close or block.
-// Connect schedules a manager-lifetime connection, not a request-lifetime one.
 type Manager struct {
-	cfg         Config
-	node        *ivnp.Node
-	addressBook *client.AddressBookService
-	onEvent     func(Event)
-	rooms       map[string]string
-	mu          sync.Mutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	started     bool
-	closed      bool
-	ready       chan struct{}
-	startErr    error
-	accounts    map[int64]*accountConnection
-	wg          sync.WaitGroup
-	closeOnce   sync.Once
-	closeErr    error
+	cfg               Config
+	node              *ivnp.Node
+	addressBook       *client.AddressBookService
+	createDestination func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error)
+	onEvent           func(Event)
+	rooms             map[string]string
+	mu                sync.Mutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	started           bool
+	closed            bool
+	ready             chan struct{}
+	startErr          error
+	accounts          map[int64]*accountConnection
+	wg                sync.WaitGroup
+	accountWG         sync.WaitGroup
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 type accountConnection struct {
-	account     Account
-	local       *foundation.LocalDestination
+	account Account
+	local   *foundation.LocalDestination
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan struct{}
+	// Lease fields are protected by Manager.mu, not the connection mutex.
+	leases      int
+	closing     bool
+	idleTimer   *time.Timer
+	idleEpoch   uint64
 	mu          sync.Mutex
 	connection  *wireConnection
 	joined      map[string]bool
@@ -104,8 +117,14 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	if cfg.ConfigPath == "" || len(cfg.Rooms) == 0 || onEvent == nil {
 		return nil, errInvalidConfig
 	}
-	if cfg.IdleTimeout < 0 || cfg.PongTimeout < 0 {
+	if cfg.IdleTimeout < 0 || cfg.PongTimeout < 0 || cfg.MaxAccounts < 0 || cfg.AccountIdleGrace < 0 {
 		return nil, errInvalidConfig
+	}
+	if cfg.MaxAccounts == 0 {
+		cfg.MaxAccounts = 16
+	}
+	if cfg.AccountIdleGrace == 0 {
+		cfg.AccountIdleGrace = 2 * time.Minute
 	}
 	rooms := make(map[string]string, len(cfg.Rooms))
 	for _, room := range cfg.Rooms {
@@ -120,6 +139,10 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	configuration, err := ivnp.LoadOrCreateConfig(cfg.ConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("load IVNP configuration: %w", err)
+	}
+	// IVNP also owns its default destination; the observer has a separate one.
+	if cfg.MaxAccounts > configuration.State.MaxDestinations-2 {
+		return nil, fmt.Errorf("IRC account limit exceeds IVNP destination capacity: %w", errInvalidConfig)
 	}
 	addressBook, err := newAddressBook(configuration)
 	if err != nil {
@@ -138,7 +161,7 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 		return nil, errors.Join(fmt.Errorf("open embedded IVNP router: %w", err), addressBook.Close(), addressBook.Wait())
 	}
 	cfg.Rooms = append([]string(nil), cfg.Rooms...)
-	return &Manager{cfg: cfg, node: node, addressBook: addressBook, onEvent: onEvent, rooms: rooms, ready: make(chan struct{}), accounts: make(map[int64]*accountConnection)}, nil
+	return &Manager{cfg: cfg, node: node, addressBook: addressBook, createDestination: node.DestinationController().CreateDestination, onEvent: onEvent, rooms: rooms, ready: make(chan struct{}), accounts: make(map[int64]*accountConnection)}, nil
 }
 
 // Start returns before reseeding, tunnel construction, or IRC registration.
@@ -176,6 +199,12 @@ func (m *Manager) runRouter() {
 		m.status(0, "connecting", "I2P router started; building anonymous tunnels")
 		<-m.ctx.Done()
 	}
+	m.mu.Lock()
+	for _, state := range m.accounts {
+		m.stopAccountLocked(state)
+	}
+	m.mu.Unlock()
+	m.accountWG.Wait()
 	closeErr := errors.Join(m.addressBook.Close(), m.node.Close())
 	waitErr := errors.Join(m.addressBook.Wait(), m.node.Wait())
 	m.mu.Lock()
@@ -183,64 +212,206 @@ func (m *Manager) runRouter() {
 	m.mu.Unlock()
 }
 
-// Connect is idempotent for an already scheduled account. The caller retains
-// ownership of Identity.Keys; only the validated destination is retained here.
-func (m *Manager) Connect(ctx context.Context, account Account) error {
+// ConnectObserver pins account zero until manager shutdown. Identity.Keys stays
+// caller-owned; the manager restores and owns a separate private destination.
+func (m *Manager) ConnectObserver(ctx context.Context, account Account) error {
+	if account.ID != 0 {
+		return errInvalidAccount
+	}
+	_, err := m.acquire(ctx, account)
+	return err
+}
+
+// Acquire holds a registered account until the returned idempotent release runs.
+// The caller must release even after ctx is canceled; ctx only bounds admission.
+func (m *Manager) Acquire(ctx context.Context, account Account) (func(), error) {
+	if account.ID <= 0 {
+		return nil, errInvalidAccount
+	}
+	return m.acquire(ctx, account)
+}
+
+func (m *Manager) acquire(ctx context.Context, account Account) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !validNick(account.Nick) || serviceNick(account.Nick) {
+		return nil, ErrInvalidNick
+	}
+	shortPassword := account.ID != 0 && len(account.Password) < 16
+	invalidPassword := account.Password != "" && !validPassword(account.Password)
+	if shortPassword || invalidPassword {
+		return nil, errInvalidAccount
+	}
+	for {
+		m.mu.Lock()
+		if err := m.admissionErrorLocked(ctx); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		if state := m.accounts[account.ID]; state != nil {
+			if state.closing || state.ctx.Err() != nil {
+				done := state.done
+				m.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-m.ctx.Done():
+					return nil, m.ctx.Err()
+				case <-done:
+					continue
+				}
+			}
+			if state.account.Identity.Address != account.Identity.Address || state.account.Nick != account.Nick {
+				m.mu.Unlock()
+				return nil, errInvalidAccount
+			}
+			release := m.leaseLocked(state)
+			m.mu.Unlock()
+			return release, nil
+		}
+		registered := len(m.accounts)
+		if m.accounts[0] != nil {
+			registered--
+		}
+		if account.ID != 0 && registered >= m.cfg.MaxAccounts {
+			m.mu.Unlock()
+			return nil, ErrAccountCapacity
+		}
+		for _, active := range m.accounts {
+			if active.account.Identity.Address == account.Identity.Address || fold(active.account.Nick) == fold(account.Nick) {
+				m.mu.Unlock()
+				return nil, errInvalidAccount
+			}
+		}
+		local, err := restoreIdentity(account.Identity)
+		if err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		if err := m.admissionErrorLocked(ctx); err != nil {
+			local.ReleaseSensitive()
+			m.mu.Unlock()
+			return nil, err
+		}
+		account.Identity.Keys = nil
+		account.Email = ""
+		lifetime, cancel := context.WithCancel(m.ctx)
+		state := &accountConnection{account: account, local: local, ctx: lifetime, cancel: cancel, done: make(chan struct{}), joined: make(map[string]bool), unavailable: make(map[string]bool)}
+		m.accounts[account.ID] = state
+		release := m.leaseLocked(state)
+		m.accountWG.Go(func() { m.runAccount(state) })
+		m.mu.Unlock()
+		return release, nil
+	}
+}
+
+func (m *Manager) admissionErrorLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !validNick(account.Nick) || serviceNick(account.Nick) {
-		return ErrInvalidNick
-	}
-	if account.ID < 0 {
-		return errInvalidAccount
-	}
-	if account.ID != 0 && len(account.Password) < 16 {
-		return errInvalidAccount
-	}
-	if account.Password != "" && !validPassword(account.Password) {
-		return errInvalidAccount
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
 		return net.ErrClosed
 	}
 	if !m.started {
 		return ErrNotStarted
 	}
-	if err := m.ctx.Err(); err != nil {
-		return err
+	return m.ctx.Err()
+}
+
+// Retain holds an existing registered account without creating a destination.
+func (m *Manager) Retain(ctx context.Context, accountID int64) (func(), error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.admissionErrorLocked(ctx); err != nil {
+		return nil, err
 	}
-	if _, exists := m.accounts[account.ID]; exists {
+	if accountID <= 0 {
+		return nil, ErrObserverReadOnly
+	}
+	state := m.accounts[accountID]
+	if state == nil || state.closing || state.ctx.Err() != nil {
+		return nil, ErrNotConnected
+	}
+	return m.leaseLocked(state), nil
+}
+
+func (m *Manager) leaseLocked(state *accountConnection) func() {
+	if state.account.ID == 0 {
 		return nil
 	}
-	for _, active := range m.accounts {
-		if active.account.Identity.Address == account.Identity.Address || fold(active.account.Nick) == fold(account.Nick) {
-			return errInvalidAccount
+	state.leases++
+	state.idleEpoch++
+	if state.idleTimer != nil {
+		state.idleTimer.Stop()
+		state.idleTimer = nil
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if m.accounts[state.account.ID] != state || state.closing || m.closed {
+				return
+			}
+			state.leases--
+			if state.leases != 0 {
+				return
+			}
+			state.idleEpoch++
+			epoch := state.idleEpoch
+			state.idleTimer = time.AfterFunc(m.cfg.AccountIdleGrace, func() {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				if m.accounts[state.account.ID] == state && state.idleEpoch == epoch && state.leases == 0 {
+					m.stopAccountLocked(state)
+				}
+			})
+		})
+	}
+}
+
+func (m *Manager) stopAccountLocked(state *accountConnection) {
+	state.closing = true
+	state.idleEpoch++
+	if state.idleTimer != nil {
+		state.idleTimer.Stop()
+		state.idleTimer = nil
+	}
+	state.cancel()
+}
+
+func (m *Manager) finishAccount(state *accountConnection, endpoint ivnp.DestinationEndpoint) {
+	m.mu.Lock()
+	m.stopAccountLocked(state)
+	m.mu.Unlock()
+	if endpoint != nil {
+		if err := endpoint.Close(); err != nil {
+			slog.Warn("I2P endpoint cleanup failed", "account_id", state.account.ID, "error", err)
 		}
 	}
-	local, err := restoreIdentity(account.Identity)
-	if err != nil {
-		return err
+	state.local.ReleaseSensitive()
+	state.mu.Lock()
+	state.connection = nil
+	clear(state.joined)
+	clear(state.unavailable)
+	state.mu.Unlock()
+	// Emit before removing the slot so a replacement cannot publish status first.
+	m.status(state.account.ID, "stopped", "IRC account connection stopped")
+	m.mu.Lock()
+	state.account.Password = ""
+	if m.accounts[state.account.ID] == state {
+		delete(m.accounts, state.account.ID)
 	}
-	account.Identity.Keys = nil
-	account.Email = ""
-	state := &accountConnection{account: account, local: local, joined: make(map[string]bool), unavailable: make(map[string]bool)}
-	m.accounts[account.ID] = state
-	m.wg.Go(func() { m.runAccount(state) })
-	return nil
+	close(state.done)
+	m.mu.Unlock()
 }
 
 func (m *Manager) runAccount(state *accountConnection) {
-	defer state.local.ReleaseSensitive()
-	defer func() {
-		m.mu.Lock()
-		delete(m.accounts, state.account.ID)
-		m.mu.Unlock()
-	}()
+	var endpoint ivnp.DestinationEndpoint
+	defer func() { m.finishAccount(state, endpoint) }()
 	select {
-	case <-m.ctx.Done():
+	case <-state.ctx.Done():
 		return
 	case <-m.ready:
 	}
@@ -250,26 +421,20 @@ func (m *Manager) runAccount(state *accountConnection) {
 	if startErr != nil {
 		return
 	}
-	var endpoint ivnp.DestinationEndpoint
 	delay := 5 * time.Second
-	for m.ctx.Err() == nil {
+	for state.ctx.Err() == nil {
 		if endpoint == nil {
 			var err error
-			endpoint, err = m.node.DestinationController().CreateDestination(m.ctx, ivnp.DestinationSpec{Local: state.local})
+			endpoint, err = m.createDestination(state.ctx, ivnp.DestinationSpec{Local: state.local})
 			if err != nil {
 				slog.Warn("I2P destination creation failed", "error", err)
 				m.status(state.account.ID, "connecting", "I2P identity endpoint unavailable; retrying")
-				if !pause(m.ctx, delay) {
+				if !pause(state.ctx, delay) {
 					return
 				}
 				delay = min(delay*2, 2*time.Minute)
 				continue
 			}
-			defer func() {
-				if err := endpoint.Close(); err != nil {
-					m.status(state.account.ID, "error", "I2P endpoint closed with a cleanup error")
-				}
-			}()
 		}
 		m.status(state.account.ID, "connecting", "Waiting for I2P destination tunnels")
 		ready, ok := endpoint.(ivnp.ReadyDestinationEndpoint)
@@ -278,13 +443,13 @@ func (m *Manager) runAccount(state *accountConnection) {
 			return
 		}
 		stage := "destination readiness"
-		readyCtx, cancel := context.WithTimeout(m.ctx, 5*time.Minute)
+		readyCtx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
 		err := ready.WaitReady(readyCtx)
 		cancel()
 		if err == nil {
 			stage = "IRC dial"
 			m.status(state.account.ID, "connecting", "Connecting to IRC over I2P")
-			dialCtx, dialCancel := context.WithTimeout(m.ctx, 2*time.Minute)
+			dialCtx, dialCancel := context.WithTimeout(state.ctx, 2*time.Minute)
 			var conn net.Conn
 			conn, err = m.dialIRC(dialCtx, endpoint)
 			dialCancel()
@@ -298,12 +463,12 @@ func (m *Manager) runAccount(state *accountConnection) {
 			m.status(state.account.ID, "error", errNickUnavailable.Error())
 			return
 		}
-		if m.ctx.Err() != nil {
+		if state.ctx.Err() != nil {
 			return
 		}
 		slog.Warn("IRC connection attempt failed", "account_id", state.account.ID, "stage", stage, "error", err)
 		m.status(state.account.ID, "disconnected", "IRC connection failed during "+stage+"; reconnecting without replaying messages")
-		if !pause(m.ctx, delay) {
+		if !pause(state.ctx, delay) {
 			return
 		}
 		delay = min(delay*2, 2*time.Minute)
@@ -330,19 +495,21 @@ func (m *Manager) Send(ctx context.Context, accountID int64, room, text string) 
 	m.mu.Lock()
 	state := m.accounts[accountID]
 	closed := m.closed
-	lifetime := m.ctx
+	stopping := state != nil && state.closing
 	m.mu.Unlock()
 	if closed {
 		return net.ErrClosed
 	}
-	if lifetime != nil {
-		if err := lifetime.Err(); err != nil {
-			return err
-		}
-	}
-	if state == nil {
+	if state == nil || stopping {
 		return ErrNotConnected
 	}
+	if err := state.ctx.Err(); err != nil {
+		return err
+	}
+	writeCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(state.ctx, cancel)
+	defer stop()
+	defer cancel()
 	state.mu.Lock()
 	conn := state.connection
 	joined := state.joined[fold(canonical)]
@@ -350,7 +517,7 @@ func (m *Manager) Send(ctx context.Context, accountID int64, room, text string) 
 	if conn == nil || !joined {
 		return ErrNotConnected
 	}
-	return conn.write(ctx, line)
+	return conn.write(writeCtx, line)
 }
 
 func (m *Manager) status(accountID int64, state, text string) {
@@ -365,9 +532,13 @@ func (m *Manager) Close() error {
 		if m.cancel != nil {
 			m.cancel()
 		}
+		for _, state := range m.accounts {
+			m.stopAccountLocked(state)
+		}
 		m.mu.Unlock()
 		if started {
 			m.wg.Wait()
+			m.accountWG.Wait()
 		} else {
 			m.closeErr = errors.Join(m.addressBook.Close(), m.addressBook.Wait(), m.node.Close(), m.node.Wait())
 		}

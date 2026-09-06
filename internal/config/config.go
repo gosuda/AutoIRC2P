@@ -18,6 +18,10 @@ type Config struct {
 	Models, Rooms                                                           []string
 	Interval, Cooldown                                                      time.Duration
 	IRCIdleTimeout, IRCPongTimeout                                          time.Duration
+	Security                                                                Security
+	Retention                                                               Retention
+	HTTPBodyTimeout, HTTPWriteTimeout, IRCAccountIdleGrace                  time.Duration
+	IRCMaxAccounts                                                          int
 	SecureCookies, Offline                                                  bool
 }
 
@@ -76,7 +80,8 @@ func Load() (Config, error) {
 		return cfg, fmt.Errorf("invalid APP_ORIGIN: %w", err)
 	}
 	validScheme := parsed.Scheme == "https" || parsed.Scheme == "http"
-	if parsed.Host == "" || !validScheme || parsed.Path != "" {
+	invalidOrigin := parsed.Host == "" || !validScheme || parsed.Path != ""
+	if invalidOrigin || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return cfg, fmt.Errorf("APP_ORIGIN must be an http(s) origin without trailing slash")
 	}
 	cfg.SecureCookies = parsed.Scheme == "https"
@@ -105,6 +110,9 @@ func Load() (Config, error) {
 	cfg.IRCPongTimeout, err = time.ParseDuration(env("IRC_PONG_TIMEOUT", "2m"))
 	if err != nil || cfg.IRCPongTimeout <= 0 {
 		return cfg, fmt.Errorf("IRC_PONG_TIMEOUT must be a positive duration")
+	}
+	if err := cfg.loadProduction(); err != nil {
+		return cfg, err
 	}
 	return cfg, nil
 }

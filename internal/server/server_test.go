@@ -21,8 +21,11 @@ import (
 
 type recordingBridge struct{ sent chan string }
 
-func (b *recordingBridge) Connect(context.Context, irc.Account) error  { return nil }
-func (b *recordingBridge) RoomState(int64, string) irc.MembershipState { return irc.RoomReady }
+func (b *recordingBridge) Acquire(context.Context, irc.Account) (func(), error) {
+	return func() {}, nil
+}
+func (b *recordingBridge) Retain(context.Context, int64) (func(), error) { return func() {}, nil }
+func (b *recordingBridge) RoomState(int64, string) irc.MembershipState   { return irc.RoomReady }
 func (b *recordingBridge) Send(_ context.Context, _ int64, _, text string) error {
 	b.sent <- text
 	return nil

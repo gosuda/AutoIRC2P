@@ -22,6 +22,52 @@ IVNP runs inside the server process. No separate I2P daemon or SAM proxy is requ
 
 For frontend development, start Go with `APP_ORIGIN=http://127.0.0.1:5173`, then run `bun run dev` inside `web`. Vite proxies `/api`, including WebSockets, to `127.0.0.1:8080`. Production needs no Node server. Restart Go after replacing the frontend build so its CSP script hashes match.
 
+## Production deployment
+
+Terminate HTTPS at a reverse proxy and keep the app port private. `deploy/Caddyfile` supports automatic TLS for `PUBLIC_HOST`; `APP_UPSTREAM` defaults to `127.0.0.1:8080`. It overwrites forwarded client addresses and does not retry requests.
+
+For a proxy on the same host, set:
+
+```dotenv
+APP_ORIGIN=https://chat.example.org
+PUBLIC_HOST=chat.example.org
+LISTEN_ADDR=127.0.0.1:8080
+TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
+```
+
+Pass `PUBLIC_HOST` to the Caddy process environment and load `deploy/Caddyfile`; Caddy does not load the app's `.env` automatically.
+
+Only trusted socket peers may supply `X-Forwarded-For`. Chains are checked right-to-left; malformed chains fall back to the socket peer. Other forwarding headers are ignored. For container networks, use the proxy's exact internal address, not a trust-all range. Account for bridge/NAT addresses if a host proxy connects through a published container port.
+
+Limits are configurable in `.env.example`:
+
+| Control | Default |
+| --- | --- |
+| HTTP body / response deadline | 15s / 150s |
+| WebSockets: total / per IP / per account | 512 / 8 / 4 |
+| Handshake attempts per IP | 30/min, burst 10 |
+| Cursor updates per socket | 120/min, burst 30 |
+| Send attempts per account / per IP | 20/min / 60/min, bursts 5 / 10 |
+| Pending sends / active user destinations | 32 / 16 |
+| Unused account connection grace | 2m |
+
+Request limits reject rather than queue more work. The shared observer does not expire. User connections retain their stored identity after idle teardown; active browser tabs and sends hold leases. The browser coalesces read updates to avoid turning normal scrolling into a request burst.
+
+### Container
+
+The Dockerfile builds static SvelteKit assets and a CGO-free Go executable, then uses a non-root distroless runtime. It contains no shell, source tree, `.env`, or application keys. Run with a persistent `/data` volume, a writable `/tmp`, and an explicit `APP_ORIGIN`; a non-loopback listener without an explicit origin is rejected.
+
+```sh
+docker run --rm --read-only --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --tmpfs /tmp:rw,nosuid,noexec,size=64m \
+  --env-file .env --env APP_ORIGIN=https://chat.example.org \
+  --mount type=volume,src=autoirc2p-data,dst=/data \
+  --publish 127.0.0.1:8080:8080 autoirc2p:release
+```
+
+Provide UID/GID `65532:65532` ownership for bind-mounted data. The image uses `/` as its working directory so IVNP's default `./data` resolves inside the persistent volume. Supply an IVNP configuration if fixed peer transport ports are needed. Size container memory and file-descriptor limits for the configured destination count. Docker image construction and runtime execution were not exercised locally.
+
 ## Isolated router state
 
 Set `IVNP_CONFIG` to a private configuration file to test a fresh router without replacing the app database or user destinations. Leave `DATA_DIR` and `application.key` unchanged.
@@ -63,7 +109,7 @@ Use mode `0600` for the file. Omitted reseed and addressbook URLs retain IVNP's 
 - IRC framing rejects control characters and lines exceeding 512 bytes. Oversized translations fail rather than being split or truncated.
 - `IRC_IDLE_TIMEOUT` defaults to `20m` for registration and subsequent idle reads. `IRC_PONG_TIMEOUT` defaults to `2m` for PONG writes. Replies are immediate; these limits tolerate transport delays, not intentional pauses. The remote server's own timeout remains outside this client's control.
 
-Database version 2 migrates existing message ownership and send state without replacing account keys, sessions, translation caches, or history.
+Database version 3 migrates existing records, preserves identities and idempotency keys, and keeps message IDs monotonic after retention empties a room.
 
 ## Translation
 
@@ -83,13 +129,26 @@ These credentials do not create a web account or grant guests permission to send
 
 The browser derives 256 bits with WebCrypto PBKDF2-SHA256, 600,000 iterations. The server hashes that proof with a separate random salt and SHA-256, then compares in constant time. Public salts are HMAC-derived from normalized email identifiers for both existing and nonexistent accounts.
 
-The browser-derived proof is a reusable credential. Public deployment requires HTTPS. Sessions use HttpOnly, SameSite=Strict cookies and Secure on HTTPS. Login and registration are rate-limited by connection IP. The server does not trust arbitrary forwarded-IP headers; deployments behind a proxy should enforce per-client limits there.
+The browser-derived proof is a reusable credential. Public deployment requires HTTPS. Sessions use HttpOnly, SameSite=Strict cookies and Secure on HTTPS. Authentication limits use the validated client address; arbitrary forwarded headers cannot change that identity.
 
 Registration generates an ElGamal/Ed25519 destination with an LS2 X25519 key, compatible with IVNP Streaming. IRC passwords are random and independent of app passwords. Private destination keys and IRC passwords are AES-GCM encrypted in SQLite. Back up the database **and** `data/application.key`; losing the key breaks existing login salts and identity recovery. Restrict both to the server's OS account.
 
 NickServ authentication requires WHOIS 311/312/313/318 verification and matching NOTICE origins. Credentials are routed to the verified service server. Registration uses a destination-derived `@irc.invalid` address, not the app email. Networks lacking service attestation or `NickServ@server` routing fail closed. Mandatory email verification requires manual recovery.
 
 I2P protects the IRC transport. **The web server sees account mappings and messages; translated text is sent to Google.** Local history remains in SQLite. This is not end-to-end encrypted messaging. Review Google's API data-use policy before deployment.
+
+## Backup and retention
+
+```sh
+autoirc2p backup --data-dir data --out /srv/backups/chat-2026-09-06
+autoirc2p restore --from /srv/backups/chat-2026-09-06 --data-dir /srv/restored-chat
+```
+
+The destination's parent must exist; the destination itself must not. Restore never overwrites live data. Stop the old instance and verify the restored directory before switching `DATA_DIR`. Snapshot creation reads committed WAL data without migrating or recovering the live database.
+
+Bundles contain `chat.sqlite`, `application.key`, and a checksum manifest. Files use mode `0600`, directories `0700`. Restore checks integrity, supported schema, foreign keys, and encrypted credential/key consistency. Checksums detect corruption, not malicious replacement: keep backups in encrypted, access-controlled storage. Re-provision API keys and shared observer credentials separately. Atomic bundle publication currently supports Linux and macOS.
+
+Chat history, translations, and completed outgoing payloads default to 30-day retention (`720h`). Set a category to `0` to retain it indefinitely. Cleanup runs at startup and hourly in bounded batches. Send payload retention must be at least one hour; purged request IDs remain tombstones and cannot trigger a resend. Retention is logical deletion: older backups and WAL/free pages may retain bytes.
 
 ## Verify
 

@@ -15,9 +15,9 @@ import (
 const channelJoinInterval = 2 * time.Second
 
 func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection) (result error) {
-	joinCtx, cancelJoins := context.WithCancel(m.ctx)
+	joinCtx, cancelJoins := context.WithCancel(state.ctx)
 	var joins sync.WaitGroup
-	stop := context.AfterFunc(m.ctx, func() { _ = conn.Close() })
+	stop := context.AfterFunc(state.ctx, func() { _ = conn.Close() })
 	defer stop()
 	defer func() {
 		cancelJoins()
@@ -32,10 +32,10 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 	state.mu.Lock()
 	state.connection = conn
 	state.mu.Unlock()
-	if err := conn.write(m.ctx, "NICK "+state.account.Nick); err != nil {
+	if err := conn.write(state.ctx, "NICK "+state.account.Nick); err != nil {
 		return err
 	}
-	if err := conn.write(m.ctx, "USER "+state.account.Nick+" 0 * :HexChat"); err != nil {
+	if err := conn.write(state.ctx, "USER "+state.account.Nick+" 0 * :HexChat"); err != nil {
 		return err
 	}
 
@@ -72,7 +72,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			m.status(state.account.ID, "error", "NickServ verification timed out; no further credentials sent")
 		}
 		if msg.command == "PING" && len(msg.params) > 0 {
-			if err := conn.writeWithTimeout(m.ctx, "PONG :"+msg.params[len(msg.params)-1], pongTimeout); err != nil {
+			if err := conn.writeWithTimeout(state.ctx, "PONG :"+msg.params[len(msg.params)-1], pongTimeout); err != nil {
 				return err
 			}
 			continue
@@ -114,7 +114,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			m.status(state.account.ID, status, action.status)
 		}
 		if action.line != "" {
-			if err := conn.write(m.ctx, action.line); err != nil {
+			if err := conn.write(state.ctx, action.line); err != nil {
 				return err
 			}
 		}
@@ -149,7 +149,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 		text := msg.params[1]
 		if msg.command == "PRIVMSG" && text == "\x01VERSION\x01" && fold(msg.params[0]) == fold(state.account.Nick) && validNick(nick) && time.Since(lastVersion) >= 10*time.Second {
 			lastVersion = time.Now()
-			if err := conn.write(m.ctx, "NOTICE "+nick+" :\x01VERSION HexChat 2.16.2\x01"); err != nil {
+			if err := conn.write(state.ctx, "NOTICE "+nick+" :\x01VERSION HexChat 2.16.2\x01"); err != nil {
 				return err
 			}
 			continue

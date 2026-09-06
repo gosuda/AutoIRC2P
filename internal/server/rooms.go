@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gosuda/AutoIRC2P/internal/irc"
 	"github.com/gosuda/AutoIRC2P/internal/store"
@@ -22,6 +23,7 @@ type Room struct {
 }
 
 var errInvalidCursors = errors.New("invalid read cursors")
+var errCursorRateLimited = errors.New("cursor rate exceeded")
 
 func (s *Server) parseCursors(r *http.Request) (map[string]int64, error) {
 	cursors := make(map[string]int64)
@@ -168,6 +170,9 @@ func (s *Server) markRead(ctx context.Context, sub *subscription, room string, i
 	}
 	sub.cursorMu.Lock()
 	defer sub.cursorMu.Unlock()
+	if !sub.cursorBudget.allow(time.Now(), s.cfg.Security.CursorUpdatesPerMinute, 30) {
+		return errCursorRateLimited
+	}
 	bounded, err := s.q.BoundReadCursor(ctx, store.BoundReadCursorParams{Room: room, ID: id})
 	if err != nil {
 		return err

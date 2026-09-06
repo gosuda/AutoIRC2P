@@ -1,7 +1,6 @@
 package server
 
 import (
-	"net"
 	"net/http"
 	"time"
 )
@@ -13,10 +12,7 @@ type authWindow struct {
 
 func (s *Server) limitAuthentication(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			host = r.RemoteAddr
-		}
+		host := s.clientIP(r)
 		now := time.Now()
 		s.authMu.Lock()
 		if s.authAttempts == nil {

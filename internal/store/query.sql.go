@@ -53,6 +53,45 @@ func (q *Queries) AddMessage(ctx context.Context, arg AddMessageParams) (Message
 	return i, err
 }
 
+const backupUserSecrets = `-- name: BackupUserSecrets :many
+SELECT id,email,irc_password,identity_keys FROM users WHERE id > ? ORDER BY id LIMIT 100
+`
+
+type BackupUserSecretsRow struct {
+	ID           int64  `json:"id"`
+	Email        string `json:"email"`
+	IrcPassword  []byte `json:"irc_password"`
+	IdentityKeys []byte `json:"identity_keys"`
+}
+
+func (q *Queries) BackupUserSecrets(ctx context.Context, id int64) ([]BackupUserSecretsRow, error) {
+	rows, err := q.db.QueryContext(ctx, backupUserSecrets, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BackupUserSecretsRow{}
+	for rows.Next() {
+		var i BackupUserSecretsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.IrcPassword,
+			&i.IdentityKeys,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const boundReadCursor = `-- name: BoundReadCursor :one
 SELECT CAST(COALESCE(MAX(id),0) AS INTEGER) FROM messages WHERE room = ? AND id <= ?
 `
@@ -117,7 +156,7 @@ func (q *Queries) ClaimSend(ctx context.Context, arg ClaimSendParams) (int64, er
 }
 
 const consumeEcho = `-- name: ConsumeEcho :one
-UPDATE send_requests SET echo_consumed = 1, message_id = ?, state = 'confirmed', error_code = '', updated_at = ? WHERE user_id = ? AND request_id = ? RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at
+UPDATE send_requests SET echo_consumed = 1, message_id = ?, state = 'confirmed', error_code = '', updated_at = ? WHERE user_id = ? AND request_id = ? RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged
 `
 
 type ConsumeEchoParams struct {
@@ -150,6 +189,7 @@ func (q *Queries) ConsumeEcho(ctx context.Context, arg ConsumeEchoParams) (SendR
 		&i.ErrorCode,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
+		&i.PayloadPurged,
 	)
 	return i, err
 }
@@ -236,7 +276,7 @@ func (q *Queries) DeleteSession(ctx context.Context, tokenHash []byte) error {
 }
 
 const expireEchoes = `-- name: ExpireEchoes :many
-UPDATE send_requests SET state = 'unconfirmed', error_code = 'echo_timeout', updated_at = ? WHERE state = 'awaiting_echo' AND expires_at <= ? RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at
+UPDATE send_requests SET state = 'unconfirmed', error_code = 'echo_timeout', updated_at = ? WHERE state = 'awaiting_echo' AND expires_at <= ? RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged
 `
 
 type ExpireEchoesParams struct {
@@ -268,6 +308,7 @@ func (q *Queries) ExpireEchoes(ctx context.Context, arg ExpireEchoesParams) ([]S
 			&i.ErrorCode,
 			&i.UpdatedAt,
 			&i.ExpiresAt,
+			&i.PayloadPurged,
 		); err != nil {
 			return nil, err
 		}
@@ -283,7 +324,7 @@ func (q *Queries) ExpireEchoes(ctx context.Context, arg ExpireEchoesParams) ([]S
 }
 
 const finishSend = `-- name: FinishSend :one
-UPDATE send_requests SET state = ?, error_code = ?, updated_at = ?, expires_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at
+UPDATE send_requests SET state = ?, error_code = ?, updated_at = ?, expires_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged
 `
 
 type FinishSendParams struct {
@@ -320,6 +361,7 @@ func (q *Queries) FinishSend(ctx context.Context, arg FinishSendParams) (SendReq
 		&i.ErrorCode,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
+		&i.PayloadPurged,
 	)
 	return i, err
 }
@@ -341,7 +383,7 @@ func (q *Queries) GetObserver(ctx context.Context) (Observer, error) {
 }
 
 const getSend = `-- name: GetSend :one
-SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at FROM send_requests WHERE user_id = ? AND request_id = ?
+SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged FROM send_requests WHERE user_id = ? AND request_id = ?
 `
 
 type GetSendParams struct {
@@ -367,6 +409,7 @@ func (q *Queries) GetSend(ctx context.Context, arg GetSendParams) (SendRequest, 
 		&i.ErrorCode,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
+		&i.PayloadPurged,
 	)
 	return i, err
 }
@@ -383,7 +426,7 @@ func (q *Queries) LatestRoomMessage(ctx context.Context, room string) (int64, er
 }
 
 const listSends = `-- name: ListSends :many
-SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at FROM send_requests WHERE user_id = ? AND room = ? AND (state = 'confirmed' OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50
+SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged FROM send_requests WHERE user_id = ? AND room = ? AND payload_purged = 0 AND (state = 'confirmed' OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50
 `
 
 type ListSendsParams struct {
@@ -416,6 +459,7 @@ func (q *Queries) ListSends(ctx context.Context, arg ListSendsParams) ([]SendReq
 			&i.ErrorCode,
 			&i.UpdatedAt,
 			&i.ExpiresAt,
+			&i.PayloadPurged,
 		); err != nil {
 			return nil, err
 		}
@@ -474,7 +518,7 @@ func (q *Queries) Messages(ctx context.Context, arg MessagesParams) ([]Message, 
 }
 
 const pendingEcho = `-- name: PendingEcho :one
-SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at FROM send_requests WHERE room = ? AND nick = ? COLLATE NOCASE AND wire_text = ? AND echo_consumed = 0 AND state IN ('sending','awaiting_echo','unconfirmed') AND created_at >= ? ORDER BY created_at,rowid LIMIT 1
+SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged FROM send_requests WHERE room = ? AND nick = ? COLLATE NOCASE AND wire_text = ? AND payload_purged = 0 AND echo_consumed = 0 AND state IN ('sending','awaiting_echo','unconfirmed') AND created_at >= ? ORDER BY created_at,rowid LIMIT 1
 `
 
 type PendingEchoParams struct {
@@ -507,12 +551,13 @@ func (q *Queries) PendingEcho(ctx context.Context, arg PendingEchoParams) (SendR
 		&i.ErrorCode,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
+		&i.PayloadPurged,
 	)
 	return i, err
 }
 
 const prepareSend = `-- name: PrepareSend :one
-UPDATE send_requests SET wire_text = ?, state = 'sending', updated_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at
+UPDATE send_requests SET wire_text = ?, state = 'sending', updated_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged
 `
 
 type PrepareSendParams struct {
@@ -545,8 +590,26 @@ func (q *Queries) PrepareSend(ctx context.Context, arg PrepareSendParams) (SendR
 		&i.ErrorCode,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
+		&i.PayloadPurged,
 	)
 	return i, err
+}
+
+const pruneMessagesBatch = `-- name: PruneMessagesBatch :execrows
+DELETE FROM messages WHERE id IN (SELECT m.id FROM messages AS m WHERE m.created_at < ? ORDER BY m.created_at LIMIT ?)
+`
+
+type PruneMessagesBatchParams struct {
+	CreatedAt int64 `json:"created_at"`
+	Limit     int64 `json:"limit"`
+}
+
+func (q *Queries) PruneMessagesBatch(ctx context.Context, arg PruneMessagesBatchParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneMessagesBatch, arg.CreatedAt, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const pruneSessions = `-- name: PruneSessions :exec
@@ -556,6 +619,41 @@ DELETE FROM sessions WHERE expires_at <= ?
 func (q *Queries) PruneSessions(ctx context.Context, expiresAt int64) error {
 	_, err := q.db.ExecContext(ctx, pruneSessions, expiresAt)
 	return err
+}
+
+const pruneTranslationsBatch = `-- name: PruneTranslationsBatch :execrows
+DELETE FROM translations WHERE cache_key IN (SELECT t.cache_key FROM translations AS t WHERE t.created_at < ? ORDER BY t.created_at LIMIT ?)
+`
+
+type PruneTranslationsBatchParams struct {
+	CreatedAt int64 `json:"created_at"`
+	Limit     int64 `json:"limit"`
+}
+
+func (q *Queries) PruneTranslationsBatch(ctx context.Context, arg PruneTranslationsBatchParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneTranslationsBatch, arg.CreatedAt, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeSendPayloadsBatch = `-- name: PurgeSendPayloadsBatch :execrows
+UPDATE send_requests SET payload_purged = 1, room = '', nick = '', original = '', wire_text = '' WHERE rowid IN (SELECT s.rowid FROM send_requests AS s WHERE s.payload_purged = 0 AND s.state IN ('confirmed','failed','unconfirmed') AND s.updated_at < ? AND s.created_at < ? ORDER BY s.updated_at LIMIT ?)
+`
+
+type PurgeSendPayloadsBatchParams struct {
+	UpdatedAt int64 `json:"updated_at"`
+	CreatedAt int64 `json:"created_at"`
+	Limit     int64 `json:"limit"`
+}
+
+func (q *Queries) PurgeSendPayloadsBatch(ctx context.Context, arg PurgeSendPayloadsBatchParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeSendPayloadsBatch, arg.UpdatedAt, arg.CreatedAt, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const recoverSends = `-- name: RecoverSends :exec
@@ -604,7 +702,7 @@ func (q *Queries) RoomLanguages(ctx context.Context, room string) ([]string, err
 }
 
 const saveTranslation = `-- name: SaveTranslation :exec
-INSERT INTO translations (cache_key,translated) VALUES (?,?) ON CONFLICT(cache_key) DO UPDATE SET translated = excluded.translated
+INSERT INTO translations (cache_key,translated,created_at) VALUES (?,?,CAST(unixepoch('subsec') * 1000 AS INTEGER)) ON CONFLICT(cache_key) DO UPDATE SET translated = excluded.translated, created_at = excluded.created_at
 `
 
 type SaveTranslationParams struct {

@@ -21,15 +21,12 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		slog.Error("server stopped", "error", err)
+	if err := execute(os.Args[1:]); err != nil {
+		slog.Error("command failed", "error", err)
 		os.Exit(1)
 	}
 }
 func run() (err error) {
-	if err = config.LoadEnv(".env"); err != nil {
-		return err
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -54,14 +51,20 @@ func run() (err error) {
 		return err
 	}
 	var app *server.Server
-	bridge, err := irc.New(irc.Config{ConfigPath: cfg.IVNPConfig, Server: cfg.IRCServer, Rooms: cfg.Rooms, IdleTimeout: cfg.IRCIdleTimeout, PongTimeout: cfg.IRCPongTimeout}, func(event irc.Event) { app.Event(ctx, event) })
+	bridge, err := irc.New(irc.Config{ConfigPath: cfg.IVNPConfig, Server: cfg.IRCServer, Rooms: cfg.Rooms, IdleTimeout: cfg.IRCIdleTimeout, PongTimeout: cfg.IRCPongTimeout, MaxAccounts: cfg.IRCMaxAccounts, AccountIdleGrace: cfg.IRCAccountIdleGrace}, func(event irc.Event) { app.Event(ctx, event) })
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, bridge.Close()) }()
-	app = server.New(server.Config{Origin: cfg.Origin, WebDir: cfg.WebDir, Rooms: cfg.Rooms, SecureCookies: cfg.SecureCookies}, queries, accounts, translator, bridge)
+	app = server.New(server.Config{Origin: cfg.Origin, WebDir: cfg.WebDir, Rooms: cfg.Rooms, SecureCookies: cfg.SecureCookies, Security: server.SecurityConfig{
+		TrustedProxies: cfg.Security.TrustedProxies,
+		MaxWebSockets:  cfg.Security.MaxWebSockets, MaxWebSocketsPerIP: cfg.Security.MaxWebSocketsPerIP, MaxWebSocketsPerAccount: cfg.Security.MaxWebSocketsPerAccount,
+		WSHandshakesPerMinute: cfg.Security.WSHandshakesPerMinute, CursorUpdatesPerMinute: cfg.Security.CursorUpdatesPerMinute,
+		SendRequestsPerMinute: cfg.Security.SendRequestsPerMinute, SendRequestsPerIPMinute: cfg.Security.SendRequestsPerIPMinute, MaxPendingSends: cfg.Security.MaxPendingSends,
+	}}, queries, accounts, translator, bridge)
 	var workers sync.WaitGroup
 	workers.Go(func() { app.Run(ctx) })
+	workers.Go(func() { runRetention(ctx, queries, cfg.Retention) })
 	defer func() { stop(); workers.Wait() }()
 	if !cfg.Offline {
 		if err = bridge.Start(ctx); err != nil {
@@ -75,13 +78,13 @@ func run() (err error) {
 			observer.Nick = cfg.ObserverNick
 			observer.Password = cfg.ObserverPassword
 		}
-		if err = bridge.Connect(ctx, observer); err != nil {
+		if err = bridge.ConnectObserver(ctx, observer); err != nil {
 			return err
 		}
 	} else {
 		app.Event(ctx, irc.Event{Kind: "status", State: "disconnected", Text: "IRC_OFFLINE is enabled"})
 	}
-	httpServer := &http.Server{Addr: cfg.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16384}
+	httpServer := &http.Server{Addr: cfg.Listen, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.HTTPBodyTimeout, WriteTimeout: cfg.HTTPWriteTimeout, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16384}
 	serverError := make(chan error, 1)
 	workers.Go(func() {
 		slog.Info("HTTP listening", "address", cfg.Listen, "origin", cfg.Origin)

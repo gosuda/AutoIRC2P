@@ -136,6 +136,7 @@
   function markRead(selectedRoom: string, messageId: number) {
     if (selectedRoom !== roomName || historyLoading || historyError || subscription !== 'live' || document.visibilityState !== 'visible' || !document.hasFocus() || messageId <= (cursors[roomName] ?? 0)) return;
     cursors = { ...cursors, [roomName]: messageId };
+    rooms = rooms.map((candidate) => candidate.name === selectedRoom && candidate.unreadCount > 0 && candidate.latestMessageId <= messageId ? { ...candidate, unreadCount: 0 } : candidate);
     persistPreferences();
     active?.read(roomName, cursors[roomName]);
   }
