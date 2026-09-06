@@ -3,8 +3,9 @@
   import type { Language, Room, User } from './api';
   import { copy, languageName } from './i18n';
 
-  let { language, room, user, draft, ready, busy, error, onlogin, ondraft, onsend }: {
+  let { language, autoTranslate, room, user, draft, ready, busy, error, onlogin, ondraft, onsend }: {
     language: Language;
+    autoTranslate: boolean;
     room: Room;
     user: User | null;
     draft: string;
@@ -44,7 +45,7 @@
     cancelPress();
     press = { id: event.pointerId, started: performance.now() };
     (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
-    holdTimer = window.setTimeout(() => { held = true; }, 650);
+    if (autoTranslate) holdTimer = window.setTimeout(() => { held = true; }, 650);
   }
 
   function pointerUp(event: PointerEvent) {
@@ -71,15 +72,15 @@
     }}></textarea>
     <div class="composer-actions">
       <div class="send-actions">
-        <button type="button" class="text-button original-send" title={text.originalDescription} disabled={!canSend} onclick={() => send(true)}>{text.sendOriginal}</button>
+        {#if autoTranslate}<button type="button" class="text-button original-send" title={text.originalDescription} disabled={!canSend} onclick={() => send(true)}>{text.sendOriginal}</button>{/if}
         <button type="button" class="primary send-button" class:held disabled={!canSend} aria-describedby="composer-help" onpointerdown={pointerDown} onpointerup={pointerUp} onpointercancel={cancelPress} onlostpointercapture={cancelPress} oncontextmenu={(event) => event.preventDefault()} onclick={(event) => { if (event.detail === 0) send(false); }}>
-          {busy ? text.sending : held ? text.releaseOriginal : text.send}
+          {busy ? text.sending : autoTranslate && held ? text.releaseOriginal : text.send}
           <span aria-hidden="true">↑</span>
         </button>
       </div>
     </div>
     <p id="composer-readiness" class="composer-help" role="status">{!ready ? room.sendState === 'unavailable' ? text.unavailable : text.preparing : ''}</p>
-    <p id="composer-help" class="composer-help">{text.holdHint}</p>
+    <p id="composer-help" class="composer-help">{autoTranslate ? text.holdHint : ''}</p>
     <div id="composer-error" aria-live="polite">
       {#if invalidLine}<p class="error-text">{text.lineError}</p>{/if}
       {#if error}<p class="error-text">{error}</p><p class="field-note">{text.noRetry}</p>{/if}

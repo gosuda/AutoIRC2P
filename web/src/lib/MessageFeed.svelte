@@ -3,8 +3,9 @@
   import { messageKey, type Language, type Message, type Outgoing } from './api';
   import { copy, languageName } from './i18n';
 
-  let { language, roomName, messages, outgoing, loading, error, sendsError, checking, onread, onretry, oncheck, onrestore }: {
+  let { language, autoTranslate, roomName, messages, outgoing, loading, error, sendsError, checking, onread, onretry, oncheck, onrestore }: {
     language: Language;
+    autoTranslate: boolean;
     roomName: string;
     messages: Message[];
     outgoing: Outgoing[];
@@ -44,6 +45,7 @@
     messages;
     outgoing;
     loading;
+    autoTranslate;
     const follow = untrack(() => atBottom);
     void tick().then(() => {
       if (disposed || !viewport) return;
@@ -88,11 +90,13 @@
         <article class="message" class:own-message={message.own} class:service-message={message.service}>
           <header class="message-header">
             <span class="message-nick">{message.own ? text.you : message.nick}</span>
-            <span class="message-language">{languageName(message.sourceLanguage, language)} <span aria-hidden="true">→</span> {languageName(message.targetLanguage || language, language)}</span>
+            {#if autoTranslate}<span class="message-language">{languageName(message.sourceLanguage, language)} <span aria-hidden="true">→</span> {languageName(message.targetLanguage || language, language)}</span>{/if}
             <time datetime={message.createdAt} title={new Date(message.createdAt).toLocaleString(language)}>{timeFormat.format(new Date(message.createdAt))}</time>
             {#if message.own}{@render sentCheck()}{/if}
           </header>
-          {#if message.service}
+          {#if !autoTranslate}
+            <p class="message-translation" lang={message.sourceLanguage || undefined} dir="auto">{message.original}</p>
+          {:else if message.service}
             <p class="translation-status">{text.service}</p>
             <p class="message-original service-original" lang={message.sourceLanguage || undefined} dir="auto">{message.original}</p>
           {:else}

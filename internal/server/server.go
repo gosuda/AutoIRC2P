@@ -247,7 +247,7 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		slog.Error("read room language", "error", err)
 	}
 	roomLanguage := translate.RoomLanguage(languages)
-	for _, lang := range []string{"en", "ko"} {
+	for _, lang := range []string{"en", "ko", "original"} {
 		msg := messageFrom(row, lang)
 		msg.RoomLanguage = roomLanguage
 		s.broadcast(row.Room, lang, 0, frame{Type: "message", Message: &msg})
@@ -258,6 +258,11 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 }
 func messageFrom(row store.Message, lang string) Message {
 	msg := Message{ID: row.ID, Room: row.Room, Nick: row.Nick, Original: row.Original, SourceLanguage: row.SourceLanguage, TargetLanguage: lang, TranslationState: "pending", CreatedAt: time.UnixMilli(row.CreatedAt).UTC().Format(time.RFC3339Nano), Service: row.Service != 0, senderUserID: row.SenderUserID, senderRequestID: row.SenderRequestID}
+	if lang == "original" {
+		msg.TargetLanguage = ""
+		msg.TranslationState = "excluded"
+		return msg
+	}
 	if msg.Service {
 		msg.TranslationState = "excluded"
 		msg.Translation = msg.Original
@@ -356,6 +361,9 @@ func (s *Server) roomAllowed(room string) bool {
 	return false
 }
 func language(r *http.Request) string {
+	if r.URL.Query().Get("lang") == "original" {
+		return "original"
+	}
 	if r.URL.Query().Get("lang") == "en" {
 		return "en"
 	}

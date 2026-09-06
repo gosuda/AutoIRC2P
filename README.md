@@ -1,6 +1,6 @@
 # AutoIRC2P
 
-Read and chat on IRC2P with automatic translation. Each account has its own I2P identity. The I2P router is built in—no separate daemon is needed.
+Read and chat on IRC2P with optional automatic translation. Each account has its own I2P identity. The I2P router is built in—no separate daemon is needed.
 
 ## One-command Docker launch
 
@@ -79,6 +79,8 @@ Open `https://chat.example.org` in domain mode, or a ready HTTPS URL printed in 
 The first I2P connection can take several minutes. **Live feed** means your browser is connected; **I2P network** shows whether IRC is connected. Guests can read; create an account to send messages.
 
 Rooms appear in a vertically scrollable list from startup, ordered by the latest message. New activity reorders the list without switching your open conversation.
+
+**Auto-translate** in the chat header defaults to **Off**. Off shows only the original text in message bubbles and sends your messages without translation. On restores translated text alongside the original and translates outgoing messages into the room language; **Send original** bypasses translation for one message. The setting is saved in this browser separately for guests and each account. Off readers do not request history or live-message translations; other readers with On may still request translations of shared messages.
 
 The shared router and IRC reader retry startup failures, disconnects, and observer nickname conflicts until the app shuts down. Retry waits grow from 5 seconds to at most 2 minutes; tunnel preparation can take longer. Logs show the failure and retry delay. Recovery preserves I2P identities and never replays outgoing messages.
 

@@ -7,6 +7,7 @@
   import { copy, languageName } from '$lib/i18n';
 
   let language = $state<Language>('en');
+  let autoTranslate = $state(false);
   let user = $state<User | null>(null);
   let rooms = $state<Room[]>([]);
   let roomName = $state('');
@@ -58,10 +59,11 @@
     : subscription !== 'live' ? text[subscription]
     : user ? ready ? text.readyToChat : text.preparing : text.live);
 
-  function storedPreferences(value: string | null): { favorites: string[]; cursors: Cursors } {
-    const result = { favorites: [] as string[], cursors: {} as Cursors };
+  function storedPreferences(value: string | null): { favorites: string[]; cursors: Cursors; autoTranslate: boolean } {
+    const result = { favorites: [] as string[], cursors: {} as Cursors, autoTranslate: false };
     if (!value) return result;
-    const parsed = JSON.parse(value) as { favorites?: unknown; cursors?: unknown };
+    const parsed = JSON.parse(value) as { favorites?: unknown; cursors?: unknown; autoTranslate?: unknown };
+    result.autoTranslate = parsed.autoTranslate === true;
     const names = new Set(rooms.map((candidate) => candidate.name));
     if (Array.isArray(parsed.favorites)) result.favorites = parsed.favorites.filter((name): name is string => typeof name === 'string' && names.has(name));
     if (parsed.cursors && typeof parsed.cursors === 'object') {
@@ -81,7 +83,7 @@
         if (cursor > (merged[name] ?? 0)) { merged[name] = cursor; active?.read(name, cursor); }
       }
       cursors = merged;
-      localStorage.setItem(preferencesKey, JSON.stringify({ favorites, cursors }));
+      localStorage.setItem(preferencesKey, JSON.stringify({ favorites, cursors, autoTranslate }));
       storageError = false;
     } catch { storageError = true; }
   }
@@ -110,10 +112,12 @@
     preferencesKey = `autoirc2p:rooms:v1:${next?.id ?? 'guest'}`;
     favorites = [];
     cursors = {};
+    autoTranslate = false;
     try {
       const stored = storedPreferences(localStorage.getItem(preferencesKey));
       favorites = stored.favorites;
       cursors = stored.cursors;
+      autoTranslate = stored.autoTranslate;
       storageError = false;
     } catch { storageError = true; }
     roomName = favorites[0] ?? rooms[0]?.name ?? '';
@@ -207,6 +211,7 @@
       try {
         const stored = storedPreferences(event.newValue);
         favorites = stored.favorites;
+        autoTranslate = stored.autoTranslate;
         const merged = { ...cursors };
         for (const [name, cursor] of Object.entries(stored.cursors)) {
           if (cursor > (merged[name] ?? 0)) { merged[name] = cursor; active?.read(name, cursor); }
@@ -236,6 +241,7 @@
     if (!initialized || !roomName) return;
     const selectedRoom = roomName;
     const selectedLanguage = language;
+    const selectedAutoTranslate = autoTranslate;
     const selectedUserId = user?.id ?? 0;
     reconnectVersion;
     return untrack(() => {
@@ -246,6 +252,7 @@
       const next = subscribeRoom({
         room: selectedRoom,
         language: selectedLanguage,
+        autoTranslate: selectedAutoTranslate,
         userId: selectedUserId,
         cursors: () => cursors,
         onIdentityMismatch: refreshAccount,
@@ -314,7 +321,7 @@
     try {
       const result = await request<{ send: Outgoing }>('/api/messages', {
         method: 'POST', signal: AbortSignal.any([accountController.signal, AbortSignal.timeout(120000)]),
-        body: JSON.stringify({ room: selectedRoom, text: content, original, requestId })
+        body: JSON.stringify({ room: selectedRoom, text: content, original: original || !autoTranslate, requestId })
       });
       if (epoch === accountEpoch) receiveSends([result.send]);
     } catch (cause) {
@@ -414,7 +421,8 @@
     <header class="workspace-header">
       <div class="room-heading"><span class="context-label">{text.selectedRoom}</span><h1>{roomName || 'AutoIRC2P'}</h1></div>
       <div class="header-controls">
-        <label class="language-control"><span>{text.displayLanguage}</span><select bind:value={language} aria-label={text.displayLanguage}><option value="en">English</option><option value="ko">한국어</option></select></label>
+        <button type="button" class="account-button" role="switch" aria-checked={autoTranslate} aria-label={text.autoTranslate} onclick={() => { autoTranslate = !autoTranslate; persistPreferences(); }}>{text.autoTranslate} {autoTranslate ? 'On' : 'Off'}</button>
+        <label class="language-control"><span>{autoTranslate ? text.displayLanguage : text.interfaceLanguage}</span><select bind:value={language} aria-label={autoTranslate ? text.displayLanguage : text.interfaceLanguage}><option value="en">English</option><option value="ko">한국어</option></select></label>
         {#if user}<button type="button" class="account-button" disabled={loggingOut} onclick={() => void logout()} title={`@${user.nick} · ${text.logout}`}><span class="account-nick">@{user.nick}</span><span>{loggingOut ? text.working : text.logout}</span></button>
         {:else}<button type="button" class="account-button" onclick={() => { authMode = 'login'; }}>{text.login}</button>{/if}
       </div>
@@ -431,10 +439,10 @@
       <div class="workspace-loading" role="status"><span class="empty-mark" aria-hidden="true">a/</span><p>{restoring ? text.initializing : text.sessionError}</p></div>
     {:else if room}
       {#key `${roomName}:${language}:${user?.id ?? 'guest'}`}
-        <MessageFeed {language} {roomName} {messages} outgoing={visibleOutgoing} loading={historyLoading} error={historyError} {sendsError} {checking} onread={markRead} onretry={() => active?.refresh()} oncheck={(send) => void checkSend(send)} onrestore={(send) => { drafts = { ...drafts, [send.room]: send.original }; }} />
+        <MessageFeed {language} {autoTranslate} {roomName} {messages} outgoing={visibleOutgoing} loading={historyLoading} error={historyError} {sendsError} {checking} onread={markRead} onretry={() => active?.refresh()} oncheck={(send) => void checkSend(send)} onrestore={(send) => { drafts = { ...drafts, [send.room]: send.original }; }} />
       {/key}
       {#key `${roomName}:${user?.id ?? 'guest'}`}
-        <Composer {language} {room} {user} {draft} {ready} {busy} error={composeError} onlogin={() => { authMode = 'login'; }} ondraft={(value) => { drafts = { ...drafts, [roomName]: value }; }} onsend={(original) => void sendMessage(original)} />
+        <Composer {language} {autoTranslate} {room} {user} {draft} {ready} {busy} error={composeError} onlogin={() => { authMode = 'login'; }} ondraft={(value) => { drafts = { ...drafts, [roomName]: value }; }} onsend={(original) => void sendMessage(original)} />
       {/key}
     {:else}<div class="workspace-loading"><p>{text.noRooms}</p></div>{/if}
   </main>

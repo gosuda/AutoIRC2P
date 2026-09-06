@@ -125,6 +125,7 @@ export function mergeOutgoing(previous: Outgoing | undefined, incoming: Outgoing
 export function subscribeRoom(options: {
   room: string;
   language: Language;
+  autoTranslate: boolean;
   userId: number;
   cursors: () => Cursors;
   onMessages: (messages: Message[]) => void;
@@ -136,7 +137,7 @@ export function subscribeRoom(options: {
   onHistory: (loading: boolean, error: string) => void;
   onIdentityMismatch: () => void;
 }) {
-  const query = new URLSearchParams({ room: options.room, lang: options.language });
+  const query = new URLSearchParams({ room: options.room, lang: options.autoTranslate ? options.language : 'original' });
   const controller = new AbortController();
   let socket: WebSocket | undefined;
   let verifiedSocket: WebSocket | undefined;
