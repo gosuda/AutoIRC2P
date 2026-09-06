@@ -53,20 +53,42 @@ Limits are configurable in `.env.example`:
 
 Request limits reject rather than queue more work. The shared observer does not expire. User connections retain their stored identity after idle teardown; active browser tabs and sends hold leases. The browser coalesces read updates to avoid turning normal scrolling into a request burst.
 
-### Container
+### Docker Compose
 
-The Dockerfile builds static SvelteKit assets and a CGO-free Go executable, then uses a non-root distroless runtime. It contains no shell, source tree, `.env`, or application keys. Run with a persistent `/data` volume, a writable `/tmp`, and an explicit `APP_ORIGIN`; a non-loopback listener without an explicit origin is rejected.
+Requires Docker Engine with Compose v2 on the deployment server. Point your hostname's DNS records at that server and allow inbound TCP 80/443 (UDP 443 is optional for HTTP/3). No host Go, Bun, or separate I2P daemon is needed.
 
 ```sh
-docker run --rm --read-only --cap-drop=ALL \
-  --security-opt=no-new-privileges \
-  --tmpfs /tmp:rw,nosuid,noexec,size=64m \
-  --env-file .env --env APP_ORIGIN=https://chat.example.org \
-  --mount type=volume,src=autoirc2p-data,dst=/data \
-  --publish 127.0.0.1:8080:8080 autoirc2p:release
+# Only when .env does not already exist:
+cp .env.example .env
+chmod 600 .env
 ```
 
-Provide UID/GID `65532:65532` ownership for bind-mounted data. The image uses `/` as its working directory so IVNP's default `./data` resolves inside the persistent volume. Supply an IVNP configuration if fixed peer transport ports are needed. Size container memory and file-descriptor limits for the configured destination count. Docker image construction and runtime execution were not exercised locally.
+Set these values in `.env`; keep any existing provider/model settings and credentials:
+
+```dotenv
+PUBLIC_HOST=chat.example.org
+OPENAI_API_KEY=your-provider-api-key
+IRC_ROOMS='#i2p,#i2p-chat,#ko'
+```
+
+`PUBLIC_HOST` is a DNS hostname without a scheme, port, or path. `IRC_ROOMS` is comma-separated; quote the entire value so dotenv readers preserve `#`. Do not add backslashes before channel prefixes. Leave the example's full room list unchanged if you want all default channels.
+
+Deploy or rebuild after updating the source or `.env`:
+
+```sh
+docker compose up -d --build
+docker compose logs -f app caddy
+```
+
+Open `https://chat.example.org`. Caddy obtains and renews TLS certificates. Initial I2P reseeding and tunnel construction can take several minutes. Missing `PUBLIC_HOST` or `OPENAI_API_KEY` stops Compose before startup.
+
+Compose overrides the local-run `LISTEN_ADDR`, `APP_ORIGIN`, `DATA_DIR`, `WEB_DIR`, `IVNP_CONFIG`, and `TRUSTED_PROXY_CIDRS` values: the app listens privately on port 8080, uses `https://PUBLIC_HOST`, and stores state under `/data`. Only Caddy publishes host ports. The dedicated bridge uses `172.30.0.0/24`; only Caddy's `172.30.0.2/32` address is trusted. If that subnet conflicts with your network, change the subnet, Caddy address, and trusted CIDR together in `compose.yaml`.
+
+Named volumes retain application data (`app_data`), TLS certificates (`caddy_data`), and Caddy configuration (`caddy_config`) across rebuilds and `docker compose down`. **Do not use `docker compose down -v` unless you intend to delete that state.** Existing host `data/` is not imported automatically; migrate it before switching an existing installation. The runtime image is non-root and read-only except for `/data` and temporary storage; `.env` and keys are excluded from the image.
+
+For bind-mounted app data, provide UID/GID `65532:65532` ownership. The image uses `/` as its working directory so IVNP's default `./data` resolves inside the persistent volume. Supply `/data/ivnp.conf` and matching Compose port mappings if fixed peer transport ports are needed. Size container memory and file-descriptor limits for the configured destination count.
+
+Verification without Docker covered Compose schema/interpolation and native app startup with resolved environment values. Container image construction, container execution, and public TLS/I2P connectivity were not exercised locally.
 
 ## Isolated router state
 

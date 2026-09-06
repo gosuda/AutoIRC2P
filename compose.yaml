@@ -1,0 +1,71 @@
+name: autoirc2p
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8080
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      APP_ORIGIN: https://${PUBLIC_HOST:?Set PUBLIC_HOST to your public hostname in .env}
+      DATA_DIR: /data
+      WEB_DIR: /app/web
+      IVNP_CONFIG: /data/ivnp.conf
+      TRUSTED_PROXY_CIDRS: 172.30.0.2/32
+    volumes:
+      - app_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    networks:
+      - backend
+    logging:
+      driver: local
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST to your public hostname in .env}
+      APP_UPSTREAM: app:8080
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      backend:
+        ipv4_address: 172.30.0.2
+    logging:
+      driver: local
+
+networks:
+  backend:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  app_data:
+  caddy_data:
+  caddy_config:
