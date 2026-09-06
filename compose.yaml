@@ -10,7 +10,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
       APP_ORIGIN: https://${PUBLIC_HOST:?Set PUBLIC_HOST to your public hostname in .env}
       DATA_DIR: /data
-      WEB_DIR: /app/web
+      WEB_DIR: /web/build
       IVNP_CONFIG: /data/ivnp.conf
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.30.0.2/32}
     volumes:

@@ -19,6 +19,8 @@ From the cloned repository, with `OPENAI_API_KEY` exported in your shell, run th
 
 Run `docker logs -f autoirc2p` and open a ready HTTPS URL. The command uses Google's API; change `OPENAI_BASE_URL` and pass `OPENAI_MODEL_0`/`OPENAI_MODEL_1` for another provider. The key is forwarded from your environment rather than included in the command arguments.
 
+The image builds and includes the frontend at `/web/build`. If you override `WEB_DIR`, use `/web/build` or `web/build` (the container working directory is `/`). Mount persistent data at `/data`, not over the bundled frontend.
+
 This is an alternative to Compose, with its own `autoirc2p-data` volume. To rebuild, first run `docker stop autoirc2p && docker rm autoirc2p`, then repeat the command; the volume preserves your data and Portalite identity. Do not run it alongside an existing deployment when migrating the same accounts.
 
 ## Quick start with Docker Compose
