@@ -23,7 +23,7 @@
   let authMode = $state<'login' | 'register' | null>(null);
   let loggingOut = $state(false);
   let search = $state('');
-  let showAll = $state(false);
+  let showAll = $state(true);
   let favoritesOnly = $state(false);
   let favorites = $state<string[]>([]);
   let cursors = $state<Cursors>({});
@@ -52,7 +52,7 @@
     if (search.trim()) return candidate.name.toLowerCase().includes(search.trim().toLowerCase());
     if (favoritesOnly) return favorites.includes(candidate.name);
     return showAll || favorites.includes(candidate.name) || candidate.unreadCount > 0 || candidate.name === roomName || (favorites.length === 0 && index < 3);
-  }).sort((a, b) => Number(favorites.includes(b.name)) - Number(favorites.includes(a.name))));
+  }).sort((a, b) => b.latestMessageId - a.latestMessageId));
   const connectionLabel = $derived(!room || historyLoading || room.readState === 'loading' ? text.loadingHistory
     : historyError || room.readState === 'unavailable' || room.sendState === 'unavailable' ? text.unavailable
     : subscription !== 'live' ? text[subscription]
@@ -105,7 +105,8 @@
     historyLoading = true;
     historyError = sendsError = '';
     search = '';
-    showAll = favoritesOnly = false;
+    showAll = true;
+    favoritesOnly = false;
     preferencesKey = `autoirc2p:rooms:v1:${next?.id ?? 'guest'}`;
     favorites = [];
     cursors = {};
