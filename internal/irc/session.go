@@ -47,10 +47,11 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 
 	reader := frameReader{reader: bufio.NewReaderSize(conn, 512)}
 	service := nickService{account: state.account}
+	ctcp := ctcpResponder{}
 	welcome := false
 	idleTimeout := cmp.Or(m.cfg.IdleTimeout, 20*time.Minute)
 	welcomeDeadline := time.Now().Add(idleTimeout)
-	var serviceDeadline, lastVersion time.Time
+	var serviceDeadline time.Time
 	pongTimeout := cmp.Or(m.cfg.PongTimeout, 2*time.Minute)
 	for {
 		deadline := time.Now().Add(idleTimeout)
@@ -77,8 +78,8 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			service.done = true
 			m.status(state.account.ID, "error", "NickServ verification timed out; no further credentials sent")
 		}
-		if msg.command == "PING" && len(msg.params) > 0 {
-			if err := conn.writeWithTimeout(state.ctx, "PONG :"+msg.params[len(msg.params)-1], pongTimeout); err != nil {
+		if msg.command == "PING" && len(msg.params) > 0 && len(msg.params) <= 2 {
+			if err := conn.writeWithTimeout(state.ctx, "PONG "+msg.rawParams, pongTimeout); err != nil {
 				return err
 			}
 			continue
@@ -126,6 +127,13 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 				m.status(state.account.ID, "error", "IRC server refused a configured room; check channel access requirements")
 			}
 		}
+		// Servers may issue CTCP challenges before completing registration.
+		if reply := ctcp.accept(msg, state.account.Nick, time.Now()); reply != "" {
+			if err := conn.write(state.ctx, reply); err != nil {
+				return err
+			}
+			continue
+		}
 		if !welcome {
 			continue
 		}
@@ -171,13 +179,6 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			continue
 		}
 		text := msg.params[1]
-		if msg.command == "PRIVMSG" && text == "\x01VERSION\x01" && fold(msg.params[0]) == fold(state.account.Nick) && validNick(nick) && time.Since(lastVersion) >= 10*time.Second {
-			lastVersion = time.Now()
-			if err := conn.write(state.ctx, "NOTICE "+nick+" :\x01VERSION HexChat 2.16.2\x01"); err != nil {
-				return err
-			}
-			continue
-		}
 		if !utf8.ValidString(text) {
 			continue
 		}

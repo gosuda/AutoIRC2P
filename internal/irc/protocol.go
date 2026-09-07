@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -17,9 +18,10 @@ var (
 )
 
 type frame struct {
-	prefix  string
-	command string
-	params  []string
+	prefix    string
+	command   string
+	params    []string
+	rawParams string
 }
 
 type frameReader struct {
@@ -79,6 +81,7 @@ func parseFrame(line string) (frame, error) {
 	if msg.command == "" {
 		return frame{}, errMalformedFrame
 	}
+	msg.rawParams = line
 	for line != "" {
 		line = strings.TrimLeft(line, " ")
 		if line == "" {
@@ -96,6 +99,48 @@ func parseFrame(line string) (frame, error) {
 		msg.params = append(msg.params, param)
 	}
 	return msg, nil
+}
+
+type ctcpResponder struct {
+	lastVersion time.Time
+	lastPing    time.Time
+}
+
+func (r *ctcpResponder) accept(msg frame, nick string, now time.Time) string {
+	if msg.command != "PRIVMSG" || len(msg.params) != 2 || fold(msg.params[0]) != fold(nick) {
+		return ""
+	}
+	sender := sourceNick(msg.prefix)
+	if !validNick(sender) {
+		return ""
+	}
+	payload, ok := strings.CutPrefix(msg.params[1], "\x01")
+	if !ok {
+		return ""
+	}
+	payload = strings.TrimSuffix(payload, "\x01")
+	if strings.ContainsAny(payload, "\x00\x01\r\n") {
+		return ""
+	}
+	command, params, hasParams := strings.Cut(payload, " ")
+	var lastReply *time.Time
+	switch {
+	case strings.EqualFold(command, "VERSION") && !hasParams:
+		payload = "VERSION HexChat 2.16.2"
+		lastReply = &r.lastVersion
+	case strings.EqualFold(command, "PING") && hasParams && params != "":
+		lastReply = &r.lastPing
+	default:
+		return ""
+	}
+	if len("NOTICE ")+len(sender)+len(" :\x01")+len(payload)+len("\x01\r\n") > 512 {
+		return ""
+	}
+	if !lastReply.IsZero() && now.Sub(*lastReply) < 10*time.Second {
+		return ""
+	}
+	*lastReply = now
+	return "NOTICE " + sender + " :\x01" + payload + "\x01"
 }
 
 func validNick(nick string) bool {

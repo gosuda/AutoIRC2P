@@ -354,3 +354,136 @@ func TestNickServTimeoutPreservesPartialIRCFrame(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionPreservesPingParameters(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		client, server := net.Pipe()
+		if err := server.SetDeadline(time.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		manager := &Manager{ctx: ctx, onEvent: func(Event) {}}
+		state := &accountConnection{ctx: ctx, account: Account{Nick: "reader"}}
+		done := make(chan error, 1)
+		go func() { done <- manager.serveConnection(state, &wireConnection{Conn: client}) }()
+		defer func() {
+			cancel()
+			if err := server.Close(); err != nil {
+				t.Error(err)
+			}
+			<-done
+		}()
+		reader := bufio.NewReader(server)
+		for range 2 {
+			if _, err := reader.ReadString('\n'); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, welcome := range []bool{false, true} {
+			if welcome {
+				if _, err := io.WriteString(server, ":irc.example.i2p 001 reader :Welcome\r\n"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, tc := range []struct {
+				query, reply string
+			}{
+				{":irc.example.i2p PING origin.example.i2p :destination.example.i2p", "PONG origin.example.i2p :destination.example.i2p"},
+				{"PING :opaque token :with spaces  ", "PONG :opaque token :with spaces  "},
+				{"PING " + strings.Repeat("x", 505), "PONG " + strings.Repeat("x", 505)},
+			} {
+				if _, err := io.WriteString(server, tc.query+"\r\n"); err != nil {
+					t.Fatal(err)
+				}
+				if got, err := reader.ReadString('\n'); err != nil || got != tc.reply+"\r\n" {
+					t.Fatalf("PONG after welcome=%t for %q = %q, %v; want %q", welcome, tc.query, got, err, tc.reply)
+				}
+			}
+		}
+	})
+}
+
+func TestRegistrationAnswersBoundedCTCPChallenges(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		client, server := net.Pipe()
+		if err := server.SetDeadline(time.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		events := make(chan Event, 16)
+		manager := &Manager{ctx: ctx, cfg: Config{Rooms: []string{"#test"}}, rooms: map[string]string{"#test": "#test"}, onEvent: func(event Event) { events <- event }}
+		state := &accountConnection{ctx: ctx, account: Account{Nick: "alice", Password: "test-password"}, joined: make(map[string]bool)}
+		done := make(chan error, 1)
+		go func() { done <- manager.serveConnection(state, &wireConnection{Conn: client}) }()
+		defer func() {
+			cancel()
+			if err := server.Close(); err != nil {
+				t.Error(err)
+			}
+			<-done
+		}()
+		reader := bufio.NewReader(server)
+		readLine := func(want string) {
+			t.Helper()
+			if got, err := reader.ReadString('\n'); err != nil || got != want+"\r\n" {
+				t.Fatalf("IRC frame = %q, %v; want %q", got, err, want)
+			}
+		}
+		writeLine := func(line string) {
+			t.Helper()
+			if _, err := io.WriteString(server, line+"\r\n"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for range 2 {
+			if _, err := reader.ReadString('\n'); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeLine(strings.Join([]string{
+			":checker!user@host NOTICE alice :\x01VERSION\x01",
+			":checker!user@host PRIVMSG #test :\x01VERSION\x01",
+			":checker!user@host PRIVMSG someone :\x01VERSION\x01",
+			":bad,target!user@host PRIVMSG alice :\x01VERSION\x01",
+			":checker!user@host PRIVMSG alice :\x01PING first\x01PING second\x01",
+			":checker!user@host PRIVMSG alice :\x01VERSION extra\x01",
+			":checker!user@host PRIVMSG alice :\x01PING\x01",
+			":irc.example.i2p 311 alice NickServ services services.example.i2p * :Nickname service",
+			":irc.example.i2p 312 alice NickServ services.example.i2p :Services",
+			":irc.example.i2p 313 alice NickServ :is a Network Service",
+			":irc.example.i2p 318 alice NickServ :End of WHOIS",
+			":NickServ!services@services.example.i2p NOTICE alice :This nickname is registered. Identify yourself.",
+			"PING :before-challenge",
+		}, "\r\n"))
+		readLine("PONG :before-challenge")
+		writeLine(":checker!user@host PRIVMSG ALICE :\x01VERSION\x01")
+		readLine("NOTICE checker :\x01VERSION HexChat 2.16.2\x01")
+		writeLine(":checker!user@host PRIVMSG alice :\x01pInG opaque  :token ")
+		readLine("NOTICE checker :\x01pInG opaque  :token \x01")
+		writeLine(":checker!user@host PRIVMSG alice :\x01VERSION\x01\r\n:checker!user@host PRIVMSG alice :\x01PING repeat\x01\r\nPING :rate-limit")
+		readLine("PONG :rate-limit")
+		<-time.After(10 * time.Second)
+		writeLine(":checker!user@host PRIVMSG alice :\x01vErSiOn")
+		readLine("NOTICE checker :\x01VERSION HexChat 2.16.2\x01")
+		writeLine(":checker!user@host PRIVMSG alice :\x01PING after-limit\x01")
+		readLine("NOTICE checker :\x01PING after-limit\x01")
+		writeLine(":irc.example.i2p 001 alice :Welcome")
+		readLine("WHOIS NickServ")
+		readLine("JOIN #test")
+		writeLine(":alice!alice@host JOIN :#test\r\n:bob!bob@host PRIVMSG #test :challenge completed")
+		for {
+			select {
+			case event := <-events:
+				if event.Kind != "message" {
+					continue
+				}
+				if event.Nick != "bob" || event.Room != "#test" || event.Text != "challenge completed" || event.Service {
+					t.Fatalf("channel message after registration = %+v", event)
+				}
+				return
+			case <-time.After(time.Second):
+				t.Fatal("channel message not received after registration challenges")
+			}
+		}
+	})
+}
