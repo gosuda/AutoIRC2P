@@ -282,3 +282,75 @@ func TestI2PKeepaliveToleratesDelayedPingAndPong(t *testing.T) {
 		})
 	}
 }
+
+func TestNickServTimeoutPreservesPartialIRCFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix, suffix, response string
+		wantErr                        error
+	}{
+		{
+			name:   "resumes fragmented ping",
+			prefix: "PING :fragment", suffix: "-continued\r\n",
+			response: "PONG :fragment-continued\r\n",
+		},
+		{
+			name:   "enforces combined wire limit",
+			prefix: "PING :" + strings.Repeat("x", 490), suffix: strings.Repeat("x", 15) + "\r\n",
+			wantErr: ErrLineTooLong,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				client, server := net.Pipe()
+				if err := server.SetDeadline(time.Now().Add(5 * time.Minute)); err != nil {
+					t.Fatal(err)
+				}
+				manager := &Manager{ctx: ctx, onEvent: func(Event) {}}
+				state := &accountConnection{ctx: ctx, account: Account{ID: 1, Nick: "alice", Password: "test-password-123"}}
+				done := make(chan error, 1)
+				go func() { done <- manager.serveConnection(state, &wireConnection{Conn: client}) }()
+				defer func() {
+					cancel()
+					if err := server.Close(); err != nil {
+						t.Error(err)
+					}
+					if done != nil {
+						<-done
+					}
+				}()
+				reader := bufio.NewReader(server)
+				readLine := func(want string) {
+					t.Helper()
+					if got, err := reader.ReadString('\n'); err != nil || got != want {
+						t.Fatalf("IRC frame = %q, %v; want %q", got, err, want)
+					}
+				}
+				write := func(text string) {
+					t.Helper()
+					if _, err := io.WriteString(server, text); err != nil {
+						t.Fatal(err)
+					}
+				}
+				readLine("NICK alice\r\n")
+				readLine("USER alice 0 * :HexChat\r\n")
+				write(":irc.example.i2p 001 alice :Welcome\r\n")
+				readLine("WHOIS NickServ\r\n")
+				write(tc.prefix)
+				readLine("PING :autoirc2p\r\n")
+				readLine("PING :autoirc2p\r\n")
+				synctest.Wait()
+				write(tc.suffix)
+				if tc.wantErr != nil {
+					err := <-done
+					done = nil
+					if !errors.Is(err, tc.wantErr) {
+						t.Fatalf("oversized resumed frame error = %v, want %v", err, tc.wantErr)
+					}
+					return
+				}
+				readLine(tc.response)
+			})
+		})
+	}
+}

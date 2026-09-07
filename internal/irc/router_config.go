@@ -30,11 +30,6 @@ func loadRouterConfig(path string) (ivnp.Config, error) {
 	if !routerHopsConfigured(string(contents)) {
 		configuration.Tunnel.Hops = 1
 	}
-	// IVNP evicts still-advertised circuits when renewal fills the pool.
-	// Keep both generations alive until peers' cached leases expire.
-	tunnel := &configuration.Tunnel
-	tunnel.ClientPoolCapacity = max(tunnel.ClientPoolCapacity, 2*(tunnel.ClientInboundTarget+tunnel.ClientOutboundTarget))
-	tunnel.ExploratoryPoolCapacity = max(tunnel.ExploratoryPoolCapacity, 2*(tunnel.ExploratoryInboundTarget+tunnel.ExploratoryOutboundTarget))
 	return configuration, nil
 }
 

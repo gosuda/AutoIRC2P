@@ -30,8 +30,8 @@ func TestChannelMessageLimitsWireBytesNotRunes(t *testing.T) {
 }
 
 func TestReadFrameRejectsUnboundedInput(t *testing.T) {
-	reader := bufio.NewReaderSize(strings.NewReader(strings.Repeat("x", 2048)), 512)
-	if _, err := readFrame(reader); !errors.Is(err, ErrLineTooLong) {
+	reader := frameReader{reader: bufio.NewReaderSize(strings.NewReader(strings.Repeat("x", 2048)), 512)}
+	if _, err := reader.read(); !errors.Is(err, ErrLineTooLong) {
 		t.Fatalf("oversized frame error = %v", err)
 	}
 }

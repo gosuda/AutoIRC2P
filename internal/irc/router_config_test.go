@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"gosuda.org/ivnp"
-	"gosuda.org/ivnp/controlplane"
 )
 
 func TestLoadRouterConfigCreatesPrivateConfigAndParents(t *testing.T) {
@@ -121,38 +120,5 @@ func TestLoadRouterConfigRejectsSymlinkWithoutReplacingTarget(t *testing.T) {
 	}
 	if string(contents) != text {
 		t.Errorf("symlink target was replaced: %q", contents)
-	}
-}
-
-func TestRouterTunnelRenewalRetainsAdvertisedLeases(t *testing.T) {
-	configuration, err := loadRouterConfig(filepath.Join(t.TempDir(), "ivnp.conf"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name                        string
-		capacity, inbound, outbound int
-	}{
-		{"client", configuration.Tunnel.ClientPoolCapacity, configuration.Tunnel.ClientInboundTarget, configuration.Tunnel.ClientOutboundTarget},
-		{"exploratory", configuration.Tunnel.ExploratoryPoolCapacity, configuration.Tunnel.ExploratoryInboundTarget, configuration.Tunnel.ExploratoryOutboundTarget},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := controlplane.TunnelNewPool(tc.capacity)
-			target := uint32(tc.inbound + tc.outbound)
-			for id := uint32(1); id <= target; id++ {
-				if err := pool.Add(controlplane.TunnelEntry{ID: id, Expires: 600_000}, 0); err != nil {
-					t.Fatal(err)
-				}
-			}
-			for id := uint32(1); id <= target; id++ {
-				_, retired, err := pool.Replace(controlplane.TunnelEntry{ID: target + id, Expires: 990_000}, id, 390_000)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, alive := pool.Get(id, 390_000); retired || !alive {
-					t.Fatalf("renewal evicted advertised tunnel %d with 210 seconds remaining", id)
-				}
-			}
-		})
 	}
 }

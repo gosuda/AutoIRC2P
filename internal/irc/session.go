@@ -45,7 +45,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 		return err
 	}
 
-	reader := bufio.NewReaderSize(conn, 512)
+	reader := frameReader{reader: bufio.NewReaderSize(conn, 512)}
 	service := nickService{account: state.account}
 	welcome := false
 	idleTimeout := cmp.Or(m.cfg.IdleTimeout, 20*time.Minute)
@@ -63,7 +63,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			return err
 		}
-		msg, err := readFrame(reader)
+		msg, err := reader.read()
 		serviceExpired := !service.done && !serviceDeadline.IsZero() && !time.Now().Before(serviceDeadline)
 		if err != nil {
 			if welcome && serviceExpired && timeoutError(err) {

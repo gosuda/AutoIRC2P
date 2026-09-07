@@ -88,6 +88,13 @@ Ordinary IRC reconnects reuse the existing I2P destination, identity, tunnels, a
 
 Missing or expired local tunnel routes trigger destination recreation instead of retrying a stale route indefinitely. A channel-level `437` response marks only that room unavailable. A failed browser session refresh leaves the existing feed connected; WebSocket retry backoff resets only after identity verification and the room snapshot. Account network status is not overwritten by shared-reader status.
 
+NickServ verification timeout does not discard a partially received IRC frame;
+the next read resumes it under the same 512-byte wire limit. An IRC `KILL` or
+`ERROR` containing `spambot kill` is a server-side refusal, not a tunnel timeout.
+Obtain the IRC operator's permission for bots and relaying. Stop the deployment
+or set `IRC_OFFLINE=1` while resolving a persistent refusal instead of repeatedly
+reconnecting or changing identities.
+
 ## Customize
 
 Edit `.env`, then run the start command again.
@@ -112,7 +119,7 @@ hops = 3
 
 Existing explicit hop settings are preserved. One hop offers less anonymity margin than multiple hops.
 
-The app reserves at least two tunnel generations in each pool: `2 × (inbound_target + outbound_target)`, normally **8 client** and **16 exploratory** slots. Smaller configured capacities are raised in memory; larger limits and the configuration file are preserved. This prevents renewal from immediately evicting still-advertised tunnels under the default renewal timing.
+Configured tunnel pool capacities are preserved. IVNP removes replaced tunnels from selection but retains their execution state until the original advertised expiration, so renewal does not interrupt peers still using cached leases.
 
 ## Updates and data
 

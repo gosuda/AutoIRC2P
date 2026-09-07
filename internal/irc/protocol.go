@@ -22,21 +22,32 @@ type frame struct {
 	params  []string
 }
 
-func readFrame(reader *bufio.Reader) (frame, error) {
-	bytes, err := reader.ReadSlice('\n')
-	if errors.Is(err, bufio.ErrBufferFull) {
+type frameReader struct {
+	reader  *bufio.Reader
+	partial []byte
+}
+
+func (r *frameReader) read() (frame, error) {
+	bytes, err := r.reader.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) || len(r.partial)+len(bytes) > 512 {
 		return frame{}, ErrLineTooLong
 	}
-	if err != nil && len(bytes) != 0 {
+	if err != nil && timeoutError(err) {
+		// NickServ expiry interrupts reads without terminating the IRC stream.
+		r.partial = append(r.partial, bytes...)
+		return frame{}, err
+	}
+	if err != nil && len(r.partial)+len(bytes) != 0 {
 		return frame{}, errMalformedFrame
 	}
 	if err != nil {
 		return frame{}, err
 	}
-	line := string(bytes)
-	if len(line) > 512 {
-		return frame{}, ErrLineTooLong
+	if len(r.partial) != 0 {
+		bytes = append(r.partial, bytes...)
+		r.partial = bytes[:0]
 	}
+	line := string(bytes)
 	if !strings.HasSuffix(line, "\r\n") {
 		return frame{}, errMalformedFrame
 	}
