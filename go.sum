@@ -68,6 +68,8 @@ gosuda.org/ivnp v0.0.0-20260907142944-3e93d76a04dd h1:Koe/dg1yNKKEZ4FsbpTdFrtJyG
 gosuda.org/ivnp v0.0.0-20260907142944-3e93d76a04dd/go.mod h1:4JAzKDAm2lqNws+yqgfuZFO6bbYMzoJLV0CK3wJxQ7g=
 gosuda.org/ivnp v0.0.0-20260907151742-bf2f612cd76f h1:x1Mr2+MX0X85+/owEZOoVScG7Ie+jihbXVQfDAWzheg=
 gosuda.org/ivnp v0.0.0-20260907151742-bf2f612cd76f/go.mod h1:4JAzKDAm2lqNws+yqgfuZFO6bbYMzoJLV0CK3wJxQ7g=
+gosuda.org/ivnp v0.0.0-20260907162947-a68db3875a8f h1:2tgFzvpvCblAvy0JX6T3Rqlj6i/yy8F0ErDFAZD2MEA=
+gosuda.org/ivnp v0.0.0-20260907162947-a68db3875a8f/go.mod h1:4JAzKDAm2lqNws+yqgfuZFO6bbYMzoJLV0CK3wJxQ7g=
 gosuda.org/portalite v0.0.0-20260826135640-1f955935677b h1:CMcCcRVGu/VvY+/c8ZNgc9ZVhzEFe4eo2dTRyfjfz50=
 gosuda.org/portalite v0.0.0-20260826135640-1f955935677b/go.mod h1:sYvW2mTppOsNR9wsGeI5TYSSdy/tKRZbgTOKQbmb7hY=
 modernc.org/cc/v4 v4.29.2 h1:h6+9ciCnPKutf4I03CvheAvDLX7+IHlqR6Iy6J+cgd8=
