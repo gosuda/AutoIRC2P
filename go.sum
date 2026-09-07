@@ -62,8 +62,8 @@ google.golang.org/protobuf v1.36.12 h1:pJOKDDOyeXErUroCihFAd5LQuwXBSpVnKGrj5o/fw
 google.golang.org/protobuf v1.36.12/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
-gosuda.org/ivnp v0.0.0-20260906113531-95d76218a2aa h1:eQzm0Qt5f7yxSiyl+ELq1mQAnfYR7GXr2yhDpI6O/vs=
-gosuda.org/ivnp v0.0.0-20260906113531-95d76218a2aa/go.mod h1:4JAzKDAm2lqNws+yqgfuZFO6bbYMzoJLV0CK3wJxQ7g=
+gosuda.org/ivnp v0.0.0-20260906144716-8abfdef36b48 h1:0qeN7KvSwtWhzIdEM2SRRgWwOa/V5YeQSpaGhGLzU9w=
+gosuda.org/ivnp v0.0.0-20260906144716-8abfdef36b48/go.mod h1:4JAzKDAm2lqNws+yqgfuZFO6bbYMzoJLV0CK3wJxQ7g=
 gosuda.org/portalite v0.0.0-20260826135640-1f955935677b h1:CMcCcRVGu/VvY+/c8ZNgc9ZVhzEFe4eo2dTRyfjfz50=
 gosuda.org/portalite v0.0.0-20260826135640-1f955935677b/go.mod h1:sYvW2mTppOsNR9wsGeI5TYSSdy/tKRZbgTOKQbmb7hY=
 modernc.org/cc/v4 v4.29.2 h1:h6+9ciCnPKutf4I03CvheAvDLX7+IHlqR6Iy6J+cgd8=

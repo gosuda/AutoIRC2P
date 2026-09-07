@@ -335,6 +335,11 @@ func (s *Server) broadcastLocked(room, lang string, userID int64, f frame) {
 			continue
 		}
 		outgoing := f
+		if f.Type == "status" && userID == 0 {
+			if status, ok := s.accountStates[sub.userID]; ok {
+				outgoing.State, outgoing.Detail = status.State, status.Detail
+			}
+		}
 		if f.Message != nil {
 			msg := personalize(*f.Message, sub.userID)
 			if msg.Service {

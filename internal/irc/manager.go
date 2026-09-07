@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"gosuda.org/ivnp"
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -374,6 +375,7 @@ func (m *Manager) finishAccount(state *accountConnection, endpoint ivnp.Destinat
 
 func (m *Manager) runAccount(state *accountConnection) {
 	var endpoint ivnp.DestinationEndpoint
+	endpointReady := false
 	defer func() { m.finishAccount(state, endpoint) }()
 	m.status(state.account.ID, "connecting", "Waiting for embedded I2P router")
 	select {
@@ -388,7 +390,8 @@ func (m *Manager) runAccount(state *accountConnection) {
 			m.status(state.account.ID, "connecting", "Creating I2P destination")
 			endpoint, err = m.createDestination(state.ctx, ivnp.DestinationSpec{Local: state.local})
 		}
-		if err == nil {
+		// Renewal can reset publication readiness while existing tunnels remain usable.
+		if err == nil && !endpointReady {
 			stage = "destination readiness"
 			m.status(state.account.ID, "connecting", "Waiting for I2P destination tunnels")
 			if ready, ok := endpoint.(ivnp.ReadyDestinationEndpoint); ok {
@@ -398,6 +401,7 @@ func (m *Manager) runAccount(state *accountConnection) {
 			} else {
 				err = errNoReadiness
 			}
+			endpointReady = err == nil
 		}
 		if err == nil {
 			stage = "IRC dial"
@@ -414,19 +418,20 @@ func (m *Manager) runAccount(state *accountConnection) {
 		if state.ctx.Err() != nil {
 			return
 		}
-		terminalAccountError := errors.Is(err, errNickUnavailable) || errors.Is(err, errNoReadiness)
-		if state.account.ID != 0 && terminalAccountError {
+		if state.account.ID != 0 && errors.Is(err, errNoReadiness) {
 			m.status(state.account.ID, "error", err.Error())
 			return
 		}
 		closedEndpoint := errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
-		replaceEndpoint := errors.Is(err, errNoReadiness) || (stage != "IRC session" && closedEndpoint)
+		staleRoute := errors.Is(err, dataplane.TunnelErrCircuitNotFound) || errors.Is(err, dataplane.TunnelErrCircuitExpired)
+		replaceEndpoint := errors.Is(err, errNoReadiness) || staleRoute || (stage != "IRC session" && closedEndpoint)
 		if endpoint != nil && replaceEndpoint {
 			if closeErr := endpoint.Close(); closeErr != nil {
 				event := log.Warn().Int64("account_id", state.account.ID)
 				event.Err(closeErr).Msg("I2P endpoint cleanup failed")
 			}
 			endpoint = nil
+			endpointReady = false
 		}
 		event := log.Warn().Int64("account_id", state.account.ID)
 		event.Str("server", m.cfg.Server).Str("stage", stage)

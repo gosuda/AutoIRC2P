@@ -82,7 +82,11 @@ Rooms appear in a vertically scrollable list from startup, ordered by the latest
 
 **Auto-translate** in the chat header defaults to **Off**. Off shows the original text and sends messages without translation. On shows translated text and translates outgoing messages into the room language; the original is visible only while translation is pending. Right-click, hold a message for 650ms, or activate its nickname to inspect the original, languages, and timestamp. Escape, Close, or clicking elsewhere dismisses the metadata panel. **Send original** bypasses translation for one message. The setting is saved separately for guests and each account. Off readers do not request history or live-message translations; other readers with On may still request translations of shared messages. NickServ and ChanServ messages are hidden from both history and live chat without disabling service authentication.
 
-The shared router and IRC reader stay active without browser users and retry startup failures, disconnects, and observer nickname conflicts until the app shuts down. Every retry waits **1 second**; tunnel preparation and network timeouts can take longer. Registered IRC sessions send **PING every 30 seconds** (sooner if half the configured idle timeout is shorter). Incoming traffic, including PONG, keeps the session alive; an unresponsive connection still expires under `IRC_IDLE_TIMEOUT`. Zerolog console logs record connection stages, failures, retry delays, NickServ authentication status, and keepalive PING/PONG without logging chat text or credentials. Recovery preserves I2P identities and never replays outgoing messages.
+The shared router and IRC reader stay active without browser users and retry startup failures and disconnects until the app shuts down. Account sessions also retry nickname conflicts while leased, allowing stale IRC registrations to expire without changing identity. Every retry waits **1 second**; tunnel preparation and network timeouts can take longer. Registered IRC sessions send **PING every 30 seconds** (sooner if half the configured idle timeout is shorter). Incoming traffic, including PONG, keeps the session alive; an unresponsive connection still expires under `IRC_IDLE_TIMEOUT`. Recovery preserves I2P identities and never replays outgoing messages.
+
+Ordinary IRC reconnects reuse the existing I2P destination, identity, tunnels, and SDK route cache. Only the IRC stream is reopened; the five-minute initial destination-readiness wait is not repeated during LeaseSet renewal. Browser reconnects also reuse leased account sessions within `IRC_ACCOUNT_IDLE_GRACE` (default two minutes).
+
+Missing or expired local tunnel routes trigger destination recreation instead of retrying a stale route indefinitely. A channel-level `437` response marks only that room unavailable. A failed browser session refresh leaves the existing feed connected; WebSocket retry backoff resets only after identity verification and the room snapshot. Account network status is not overwritten by shared-reader status.
 
 ## Customize
 
@@ -107,6 +111,8 @@ hops = 3
 ```
 
 Existing explicit hop settings are preserved. One hop offers less anonymity margin than multiple hops.
+
+The app reserves at least two tunnel generations in each pool: `2 × (inbound_target + outbound_target)`, normally **8 client** and **16 exploratory** slots. Smaller configured capacities are raised in memory; larger limits and the configuration file are preserved. This prevents renewal from immediately evicting still-advertised tunnels under the default renewal timing.
 
 ## Updates and data
 
@@ -136,6 +142,8 @@ go run ./cmd/autoirc2p
 ```
 
 Open `http://localhost:8080`, or set `PORTALITE=1` and use the HTTPS URL in the logs. Native runs ignore `COMPOSE_FILE`; existing process environment variables override `.env`.
+
+If port 8080 is occupied, set both `LISTEN_ADDR=127.0.0.1:18080` and `APP_ORIGIN=http://localhost:18080` in `.env`, then open `http://localhost:18080`. Build the frontend **before** starting Go; its inline-script CSP hash is loaded at server startup, so rebuilding assets requires an application restart.
 
 For development checks: `gojgp check`, `go test -race ./...`, and `bun run check` in `web/`. `IRC_OFFLINE=1` skips live I2P startup for local inspection; it does not disable Portalite.
 

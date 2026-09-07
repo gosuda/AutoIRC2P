@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gosuda.org/ivnp"
+	"gosuda.org/ivnp/dataplane"
 	"gosuda.org/ivnp/foundation"
 )
 
@@ -25,24 +26,34 @@ type recoveryAttempt struct {
 
 type recoveryEndpoint struct {
 	ivnp.DestinationEndpoint
-	local    *foundation.LocalDestination
-	attempts chan<- recoveryAttempt
-	mu       sync.Mutex
-	failure  error
-	streams  []net.Conn
-	closed   chan struct{}
-	once     sync.Once
+	local       *foundation.LocalDestination
+	attempts    chan<- recoveryAttempt
+	mu          sync.Mutex
+	failure     error
+	dialFailure error
+	readiness   <-chan struct{}
+	streams     []net.Conn
+	closed      chan struct{}
+	once        sync.Once
 }
 
 func (e *recoveryEndpoint) WaitReady(ctx context.Context) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	return errors.Join(ctx.Err(), e.failure)
+	readiness, failure := e.readiness, e.failure
+	e.mu.Unlock()
+	if readiness != nil {
+		select {
+		case <-readiness:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return errors.Join(ctx.Err(), failure)
 }
 
 func (e *recoveryEndpoint) DialI2P(ctx context.Context, _ string) (net.Conn, error) {
 	e.mu.Lock()
-	if err := errors.Join(ctx.Err(), e.failure); err != nil {
+	if err := errors.Join(ctx.Err(), e.failure, e.dialFailure); err != nil {
 		e.mu.Unlock()
 		return nil, err
 	}
@@ -291,7 +302,7 @@ func TestObserverShutdownDuringBackoffClosesResources(t *testing.T) {
 	})
 }
 
-func TestRegisteredAccountNicknameRejectionRemainsTerminal(t *testing.T) {
+func TestRegisteredAccountRecoversWhenStaleNicknameExpires(t *testing.T) {
 	account := leaseAccount(t, 1, "alice")
 	account.Registered = true
 	synctest.Test(t, func(t *testing.T) {
@@ -303,25 +314,16 @@ func TestRegisteredAccountNicknameRejectionRemainsTerminal(t *testing.T) {
 		defer release()
 		first := receiveRecoveryAttempt(t, attempts, account)
 		writeRecoveryLine(t, first, ":irc.example.i2p 433 * alice :Nickname in use")
-		synctest.Wait()
-		if got := events.statusCount("stopped"); got != 1 {
-			t.Fatalf("registered account rejection emitted %d stopped events, want one", got)
+		second := retryRecoveryAttempt(t, attempts, account, time.Second)
+		joinRecoveryRoom(t, manager, second, account)
+		if got := events.statusCount("stopped"); got != 0 {
+			t.Fatalf("nickname recovery stopped the leased account %d times", got)
 		}
-		if _, err := manager.Retain(t.Context(), account.ID); !errors.Is(err, ErrNotConnected) {
-			t.Fatalf("retaining rejected account = %v, want not connected", err)
+		retain, err := manager.Retain(t.Context(), account.ID)
+		if err != nil {
+			t.Fatalf("recovered account cannot send: %v", err)
 		}
-		<-time.After(3 * time.Minute)
-		synctest.Wait()
-		select {
-		case <-attempts:
-			t.Fatal("registered account automatically retried unavailable nickname")
-		default:
-		}
-		select {
-		case <-first.endpoint.closed:
-		default:
-			t.Fatal("terminal nickname rejection retained its endpoint")
-		}
+		retain()
 	})
 }
 
@@ -382,5 +384,69 @@ func TestObserverReconnectsWhenServerStopsResponding(t *testing.T) {
 			t.Fatalf("unresponsive server connection = %q, %v; want EOF", line, err)
 		}
 		retryRecoveryAttempt(t, attempts, observer, time.Second)
+	})
+}
+
+func TestChannelTemporarilyUnavailableKeepsIRCConnection(t *testing.T) {
+	observer := leaseAccount(t, 0, "observer")
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		connection := receiveRecoveryAttempt(t, attempts, observer)
+		joinRecoveryRoom(t, manager, connection, observer)
+		writeRecoveryLine(t, connection, ":irc.example.i2p 437 observer #first :Channel temporarily unavailable")
+		synctest.Wait()
+		if got := manager.RoomState(observer.ID, "#first"); got != RoomUnavailable {
+			t.Fatalf("rejected channel = %s, want unavailable", got)
+		}
+		writeRecoveryLine(t, connection, "PING :still-connected")
+		readRecoveryLine(t, connection, "PONG :still-connected\r\n")
+	})
+}
+
+func TestObserverReplacesStaleTunnelRouteWithoutChangingIdentity(t *testing.T) {
+	observer := leaseAccount(t, 0, "observer")
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		first := receiveRecoveryAttempt(t, attempts, observer)
+		joinRecoveryRoom(t, manager, first, observer)
+		first.endpoint.mu.Lock()
+		first.endpoint.dialFailure = dataplane.TunnelErrCircuitNotFound
+		first.endpoint.mu.Unlock()
+		if err := first.peer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		second := retryRecoveryAttempt(t, attempts, observer, 2*time.Second)
+		joinRecoveryRoom(t, manager, second, observer)
+	})
+}
+
+func TestReconnectReusesReadyDestinationDuringLeaseSetRenewal(t *testing.T) {
+	account := leaseAccount(t, 1, "alice")
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		release, err := manager.Acquire(t.Context(), account)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		first := receiveRecoveryAttempt(t, attempts, account)
+		joinRecoveryRoom(t, manager, first, account)
+		first.endpoint.mu.Lock()
+		first.endpoint.readiness = make(chan struct{})
+		first.endpoint.mu.Unlock()
+		if err := first.peer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		second := retryRecoveryAttempt(t, attempts, account, time.Second)
+		if second.endpoint != first.endpoint {
+			t.Fatal("IRC reconnect replaced a reusable I2P session")
+		}
+		joinRecoveryRoom(t, manager, second, account)
 	})
 }

@@ -233,10 +233,6 @@ export function subscribeRoom(options: {
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const current = new WebSocket(url);
     socket = current;
-    current.onopen = () => {
-      if (stopped || socket !== current) return;
-      retries = 0;
-    };
     current.onmessage = (event) => {
       if (stopped || socket !== current) return;
       let frame: Frame;
@@ -256,6 +252,7 @@ export function subscribeRoom(options: {
       if (verifiedSocket !== current) return;
       if (frame.type === 'rooms') {
         options.onRooms(frame.rooms, true);
+        retries = 0;
         options.onSubscription('live');
       } else if (frame.type === 'room') {
         options.onRooms([frame.room], false);

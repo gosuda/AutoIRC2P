@@ -8,7 +8,7 @@ require (
 	github.com/pemistahl/lingua-go v1.4.0
 	github.com/rs/zerolog v1.35.1
 	golang.org/x/sys v0.47.0
-	gosuda.org/ivnp v0.0.0-20260906113531-95d76218a2aa
+	gosuda.org/ivnp v0.0.0-20260906144716-8abfdef36b48
 	gosuda.org/portalite v0.0.0-20260826135640-1f955935677b
 	modernc.org/sqlite v1.58.0
 )

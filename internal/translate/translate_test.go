@@ -63,6 +63,13 @@ func newTranslator(t *testing.T, transport roundTripFunc, cache *memoryCache) *t
 var boundary = regexp.MustCompile(`\[START_[a-f0-9]+\]|\[END_[a-f0-9]+\]`)
 var keepToken = regexp.MustCompile(`<KEEP_[a-f0-9]+_[0-9]+>`)
 
+var (
+	errExpectedSingleMessage  = errors.New("expected single user message")
+	errMissingBoundaries      = errors.New("missing request boundaries")
+	errQuotaPacing            = errors.New("quota pacing violated")
+	errExpectedProtectedSpans = errors.New("expected protected URL and code")
+)
+
 func requestData(req *http.Request) (string, string, error) {
 	var data struct {
 		Model    string `json:"model"`
@@ -74,7 +81,7 @@ func requestData(req *http.Request) (string, string, error) {
 		return "", "", err
 	}
 	if len(data.Messages) != 1 {
-		return "", "", errors.New("expected single user message")
+		return "", "", errExpectedSingleMessage
 	}
 	return data.Model, data.Messages[0].Content, nil
 }
@@ -82,7 +89,7 @@ func requestData(req *http.Request) (string, string, error) {
 func responseFor(prompt, text string) (*http.Response, error) {
 	markers := boundary.FindAllString(prompt, -1)
 	if len(markers) != 2 {
-		return nil, errors.New("missing request boundaries")
+		return nil, errMissingBoundaries
 	}
 	return completionResponse(markers[0] + text + markers[1])
 }
@@ -120,7 +127,7 @@ func TestProviderThoughtPrefixIsSeparateFromFinalTranslation(t *testing.T) {
 					}
 					markers := boundary.FindAllString(prompt, -1)
 					if len(markers) != 2 {
-						return nil, errors.New("missing request boundaries")
+						return nil, errMissingBoundaries
 					}
 					content := strings.NewReplacer("$START", markers[0], "$END", markers[1]).Replace(tc.content)
 					return completionResponse(content)
@@ -214,7 +221,7 @@ func TestQuotaPacesFallbackAndOpensOnlyFailedModel(t *testing.T) {
 				return &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": []string{"10"}}, Body: io.NopCloser(strings.NewReader("quota private-test-key"))}, nil
 			}
 			if time.Since(started) < 10*time.Second {
-				return nil, errors.New("quota pacing violated")
+				return nil, errQuotaPacing
 			}
 			return responseFor(prompt, "번역")
 		})
@@ -261,7 +268,7 @@ func TestProtectedSpansSurviveAndTargetHasSeparateCache(t *testing.T) {
 			}
 			tokens := keepToken.FindAllString(prompt, -1)
 			if len(tokens) != 2 {
-				return nil, errors.New("expected protected URL and code")
+				return nil, errExpectedProtectedSpans
 			}
 			text := "see "
 			if strings.Contains(prompt, "into Korean.") {

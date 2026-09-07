@@ -180,9 +180,6 @@
     const signal = sessionController.signal;
     restoring = true;
     sessionError = '';
-    active?.stop();
-    active = undefined;
-    subscription = 'connecting';
     try {
       const session = await request<Session>('/api/session', { signal });
       if (signal.aborted) return;

@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -87,12 +88,23 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			continue
 		}
 		if msg.command == "ERROR" {
-			return net.ErrClosed
+			return m.serverRefusal(state, msg, net.ErrClosed)
 		}
 		if serverSource(msg.prefix) {
 			switch msg.command {
-			case "432", "433", "436", "437":
-				return errNickUnavailable
+			case "437":
+				if len(msg.params) < 2 {
+					return m.serverRefusal(state, msg, errNickUnavailable)
+				}
+				room, ok := m.rooms[fold(msg.params[1])]
+				if !ok {
+					return m.serverRefusal(state, msg, errNickUnavailable)
+				}
+				m.setRoomState(state, room, RoomUnavailable)
+				m.status(state.account.ID, "error", "IRC channel temporarily unavailable: "+room)
+				continue
+			case "432", "433", "436":
+				return m.serverRefusal(state, msg, errNickUnavailable)
 			case "001":
 				if welcome || len(msg.params) < 1 || fold(msg.params[0]) != fold(state.account.Nick) {
 					continue
@@ -242,6 +254,14 @@ func (m *Manager) joinRooms(ctx context.Context, conn *wireConnection) error {
 func timeoutError(err error) bool {
 	var timeout net.Error
 	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
+func (m *Manager) serverRefusal(state *accountConnection, msg frame, cause error) error {
+	reason := ""
+	if len(msg.params) > 0 {
+		reason = m.redactService(state, msg.params[len(msg.params)-1])
+	}
+	return fmt.Errorf("%w (IRC %s: %s)", cause, msg.command, reason)
 }
 
 func (m *Manager) redactService(state *accountConnection, text string) string {

@@ -142,8 +142,10 @@ func TestPreparingRoomDoesNotTranslateOrSend(t *testing.T) {
 	}
 }
 
+var errPartialWrite = errors.New("partial write")
+
 func TestAmbiguousWriteCanConfirmOnLateObserverEcho(t *testing.T) {
-	bridge := &lifecycleBridge{state: irc.RoomReady, send: func(context.Context, int64, string, string) error { return errors.New("partial write") }}
+	bridge := &lifecycleBridge{state: irc.RoomReady, send: func(context.Context, int64, string, string) error { return errPartialWrite }}
 	app, user, token := lifecycleServer(t, bridge)
 	response, outgoing := postOutgoing(t, app, token, "Good morning everyone.", "ambiguous_request_01", true)
 	if response.Code != 503 || outgoing.State != "unconfirmed" || outgoing.MessageID != 0 {
@@ -233,5 +235,29 @@ func TestReadCursorCountsMessagesAndNeverMovesBackward(t *testing.T) {
 	}
 	if room.UnreadCount != 1 || room.LatestMessageID != next {
 		t.Fatalf("future cursor hid a later incoming message: %+v", room)
+	}
+}
+
+func TestObserverDisconnectDoesNotReplaceAccountNetworkStatus(t *testing.T) {
+	app, user, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
+	guest := &subscription{room: "#one", out: make(chan frame, 32), done: make(chan struct{}), cursors: map[string]int64{}}
+	account := &subscription{userID: user.ID, room: "#one", out: make(chan frame, 32), done: make(chan struct{}), cursors: map[string]int64{}}
+	app.subscribers[guest] = struct{}{}
+	app.subscribers[account] = struct{}{}
+	app.receive(t.Context(), irc.Event{Kind: "status", AccountID: user.ID, State: "connected"})
+	app.receive(t.Context(), irc.Event{Kind: "status", State: "disconnected"})
+	for _, tc := range []struct {
+		sub  *subscription
+		want string
+	}{{guest, "disconnected"}, {account, "connected"}} {
+		var state string
+		for len(tc.sub.out) > 0 {
+			if message := <-tc.sub.out; message.Type == "status" {
+				state = message.State
+			}
+		}
+		if state != tc.want {
+			t.Fatalf("account %d network status = %q, want %q", tc.sub.userID, state, tc.want)
+		}
 	}
 }
