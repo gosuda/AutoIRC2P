@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"regexp"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -21,6 +22,7 @@ type recoveryAttempt struct {
 	reader     *bufio.Reader
 	endpoint   *recoveryEndpoint
 	address    string
+	nick       string
 	signingErr error
 }
 
@@ -134,10 +136,15 @@ func receiveRecoveryAttempt(t *testing.T, attempts <-chan recoveryAttempt, accou
 	if err := attempt.peer.SetDeadline(time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	readRecoveryLine(t, attempt, "NICK "+account.Nick+"\r\n")
-	if _, err := attempt.reader.ReadString('\n'); err != nil {
-		t.Fatalf("read IRC user registration: %v", err)
+	attempt.nick = readSessionNick(t, attempt.reader)
+	if account.ID == 0 && account.Password == "" {
+		if matched, err := regexp.MatchString(`^Irc2PGuest[0-9]{5}$`, attempt.nick); err != nil || !matched {
+			t.Fatalf("guest nickname = %q, want Irc2PGuest and five digits: %v", attempt.nick, err)
+		}
+	} else if attempt.nick != account.Nick {
+		t.Fatalf("authenticated nickname = %q, want %q", attempt.nick, account.Nick)
 	}
+	readRecoveryLine(t, attempt, "USER "+attempt.nick+" 0 * :HexChat\r\n")
 	return attempt
 }
 
@@ -175,10 +182,12 @@ func retryRecoveryAttempt(t *testing.T, attempts <-chan recoveryAttempt, account
 
 func joinRecoveryRoom(t *testing.T, manager *Manager, attempt recoveryAttempt, account Account) {
 	t.Helper()
-	writeRecoveryLine(t, attempt, ":irc.example.i2p 001 "+account.Nick+" :Welcome")
-	readRecoveryLine(t, attempt, "WHOIS NickServ\r\n")
+	writeRecoveryLine(t, attempt, ":irc.example.i2p 001 "+attempt.nick+" :Welcome")
+	if account.ID != 0 || account.Password != "" {
+		readRecoveryLine(t, attempt, "WHOIS NickServ\r\n")
+	}
 	readRecoveryLine(t, attempt, "JOIN #first\r\n")
-	writeRecoveryLine(t, attempt, ":"+account.Nick+"!u@host JOIN :#first")
+	writeRecoveryLine(t, attempt, ":"+attempt.nick+"!u@host JOIN :#first")
 	synctest.Wait()
 	if got := manager.RoomState(account.ID, "#first"); got != RoomReady {
 		t.Fatalf("room after own JOIN = %s, want ready", got)
@@ -187,15 +196,25 @@ func joinRecoveryRoom(t *testing.T, manager *Manager, attempt recoveryAttempt, a
 
 func TestObserverRetriesNicknameRejectionWithoutStopping(t *testing.T) {
 	observer := leaseAccount(t, 0, "observer")
+	observer.Password = ""
 	synctest.Test(t, func(t *testing.T) {
 		manager, attempts, events := newRecoveryManager(t)
 		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
 			t.Fatal(err)
 		}
 		first := receiveRecoveryAttempt(t, attempts, observer)
-		writeRecoveryLine(t, first, ":irc.example.i2p 433 * observer :Nickname in use")
+		writeRecoveryLine(t, first, ":irc.example.i2p 433 * "+first.nick+" :Nickname in use")
 		second := retryRecoveryAttempt(t, attempts, observer, time.Second)
+		if second.nick == first.nick {
+			t.Fatalf("nickname rejection reused %q", first.nick)
+		}
 		joinRecoveryRoom(t, manager, second, observer)
+		writeRecoveryLine(t, second, "ERROR :Disconnected")
+		third := retryRecoveryAttempt(t, attempts, observer, time.Second)
+		if third.nick == second.nick {
+			t.Fatalf("reconnect reused %q", second.nick)
+		}
+		joinRecoveryRoom(t, manager, third, observer)
 		if got := events.statusCount("stopped"); got != 0 {
 			t.Fatalf("observer emitted %d stopped events during nickname recovery", got)
 		}
@@ -376,14 +395,17 @@ func TestObserverReconnectsWhenServerStopsResponding(t *testing.T) {
 		if err := connection.peer.SetDeadline(time.Now().Add(2 * time.Minute)); err != nil {
 			t.Fatal(err)
 		}
-		writeRecoveryLine(t, connection, ":irc.example.i2p 001 observer :Welcome")
+		writeRecoveryLine(t, connection, ":irc.example.i2p 001 "+connection.nick+" :Welcome")
 		readRecoveryLine(t, connection, "JOIN #first\r\n")
 		readRecoveryLine(t, connection, "PING :autoirc2p\r\n")
 		readRecoveryLine(t, connection, "PING :autoirc2p\r\n")
 		if line, err := connection.reader.ReadString('\n'); !errors.Is(err, io.EOF) {
 			t.Fatalf("unresponsive server connection = %q, %v; want EOF", line, err)
 		}
-		retryRecoveryAttempt(t, attempts, observer, time.Second)
+		reconnected := retryRecoveryAttempt(t, attempts, observer, time.Second)
+		if reconnected.nick == connection.nick {
+			t.Fatalf("idle timeout reused %q", connection.nick)
+		}
 	})
 }
 

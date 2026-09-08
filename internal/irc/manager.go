@@ -92,6 +92,8 @@ type accountConnection struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	done         chan struct{}
+	// Guest nickname history is owned by the connection worker.
+	guestNick string
 	// Lease fields are protected by Manager.mu, not the connection mutex.
 	leases      int
 	closing     bool

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"strings"
 	"sync"
@@ -38,10 +39,20 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 	state.mu.Lock()
 	state.connection = conn
 	state.mu.Unlock()
-	if err := conn.write(state.ctx, "NICK "+state.account.Nick); err != nil {
+	sessionNick := state.account.Nick
+	if state.account.ID == 0 && state.account.Password == "" {
+		for {
+			sessionNick = fmt.Sprintf("Irc2PGuest%05d", rand.IntN(100000))
+			if sessionNick != state.guestNick {
+				break
+			}
+		}
+		state.guestNick = sessionNick
+	}
+	if err := conn.write(state.ctx, "NICK "+sessionNick); err != nil {
 		return err
 	}
-	if err := conn.write(state.ctx, "USER "+state.account.Nick+" 0 * :HexChat"); err != nil {
+	if err := conn.write(state.ctx, "USER "+sessionNick+" 0 * :HexChat"); err != nil {
 		return err
 	}
 
@@ -107,7 +118,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			case "432", "433", "436":
 				return m.serverRefusal(state, msg, errNickUnavailable)
 			case "001":
-				if welcome || len(msg.params) < 1 || fold(msg.params[0]) != fold(state.account.Nick) {
+				if welcome || len(msg.params) < 1 || fold(msg.params[0]) != fold(sessionNick) {
 					continue
 				}
 				welcome = true
@@ -128,7 +139,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			}
 		}
 		// Servers may issue CTCP challenges before completing registration.
-		if reply := ctcp.accept(msg, state.account.Nick, time.Now()); reply != "" {
+		if reply := ctcp.accept(msg, sessionNick, time.Now()); reply != "" {
 			if err := conn.write(state.ctx, reply); err != nil {
 				return err
 			}
@@ -158,7 +169,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			continue
 		}
 		nick := sourceNick(msg.prefix)
-		if fold(nick) == fold(state.account.Nick) {
+		if fold(nick) == fold(sessionNick) {
 			switch msg.command {
 			case "JOIN":
 				if room, ok := m.rooms[fold(msg.params[0])]; ok {
@@ -171,7 +182,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 				return errNickUnavailable
 			}
 		}
-		if msg.command == "KICK" && len(msg.params) >= 2 && fold(msg.params[1]) == fold(state.account.Nick) {
+		if msg.command == "KICK" && len(msg.params) >= 2 && fold(msg.params[1]) == fold(sessionNick) {
 			m.setRoomState(state, msg.params[0], RoomUnavailable)
 			m.status(state.account.ID, "error", "Removed from an IRC room; not automatically rejoining")
 		}
@@ -186,7 +197,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 		if isService {
 			text = m.redactService(state, text)
 		}
-		if isService && fold(msg.params[0]) == fold(state.account.Nick) {
+		if isService && fold(msg.params[0]) == fold(sessionNick) {
 			m.onEvent(Event{AccountID: state.account.ID, Nick: nick, Text: text, Service: true, Kind: "message"})
 			continue
 		}

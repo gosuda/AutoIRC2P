@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+func readSessionNick(t *testing.T, reader *bufio.Reader) string {
+	t.Helper()
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(line)
+	if len(fields) != 2 || fields[0] != "NICK" || !validNick(fields[1]) {
+		t.Fatalf("invalid nickname registration: %q", line)
+	}
+	return fields[1]
+}
+
 func TestObserverReceivesAuthenticatedAccountsWithoutSendingChannelMessages(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	client, server := net.Pipe()
@@ -35,16 +48,11 @@ func TestObserverReceivesAuthenticatedAccountsWithoutSendingChannelMessages(t *t
 		}
 	})
 	reader := bufio.NewReader(server)
-	for _, expected := range []string{"NICK observer\r\n", "USER observer 0 * :HexChat\r\n"} {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatal(err)
-		}
-		if line != expected {
-			t.Fatalf("IRC registration = %q, want %q", line, expected)
-		}
+	nick := readSessionNick(t, reader)
+	if line, err := reader.ReadString('\n'); err != nil || line != "USER "+nick+" 0 * :HexChat\r\n" {
+		t.Fatalf("IRC user registration = %q, %v", line, err)
 	}
-	if _, err := io.WriteString(server, ":irc.example.i2p 001 observer :Welcome\r\n"); err != nil {
+	if _, err := io.WriteString(server, ":irc.example.i2p 001 "+nick+" :Welcome\r\n"); err != nil {
 		t.Fatal(err)
 	}
 	line, err := reader.ReadString('\n')
@@ -54,7 +62,7 @@ func TestObserverReceivesAuthenticatedAccountsWithoutSendingChannelMessages(t *t
 	if line != "JOIN #i2p\r\n" {
 		t.Fatalf("welcome response = %q, want room join", line)
 	}
-	if _, err := io.WriteString(server, ":observer!observer@observer.b32.i2p JOIN :#i2p\r\n:alice!alice@alice.b32.i2p PRIVMSG #i2p :안녕하세요\r\n"); err != nil {
+	if _, err := io.WriteString(server, ":"+nick+"!observer@observer.b32.i2p JOIN :#i2p\r\n:alice!alice@alice.b32.i2p PRIVMSG #i2p :안녕하세요\r\n"); err != nil {
 		t.Fatal(err)
 	}
 	for {
@@ -192,9 +200,9 @@ func TestJoinPacingKeepsPongResponsiveAndCancelsPendingRooms(t *testing.T) {
 			}
 			return line
 		}
+		nick := readSessionNick(t, reader)
 		readLine()
-		readLine()
-		if _, err := io.WriteString(server, ":irc.example.i2p 001 reader :Welcome\r\n"); err != nil {
+		if _, err := io.WriteString(server, ":irc.example.i2p 001 "+nick+" :Welcome\r\n"); err != nil {
 			t.Fatal(err)
 		}
 		if got := readLine(); got != "JOIN #first\r\n" {
@@ -251,10 +259,9 @@ func TestI2PKeepaliveToleratesDelayedPingAndPong(t *testing.T) {
 					<-done
 				}()
 				reader := bufio.NewReader(server)
-				for range 2 {
-					if _, err := reader.ReadString('\n'); err != nil {
-						t.Fatal(err)
-					}
+				nick := readSessionNick(t, reader)
+				if _, err := reader.ReadString('\n'); err != nil {
+					t.Fatal(err)
 				}
 				<-time.After(2 * time.Minute)
 				if _, err := io.WriteString(server, "PING :before-welcome\r\n"); err != nil {
@@ -264,7 +271,7 @@ func TestI2PKeepaliveToleratesDelayedPingAndPong(t *testing.T) {
 				if line, err := reader.ReadString('\n'); err != nil || line != "PONG :before-welcome\r\n" {
 					t.Fatalf("registration PONG = %q, %v", line, err)
 				}
-				if _, err := io.WriteString(server, ":irc.example.i2p 001 reader :Welcome\r\n"); err != nil {
+				if _, err := io.WriteString(server, ":irc.example.i2p 001 "+nick+" :Welcome\r\n"); err != nil {
 					t.Fatal(err)
 				}
 				for range int(tc.silence / (30 * time.Second)) {
@@ -374,14 +381,13 @@ func TestSessionPreservesPingParameters(t *testing.T) {
 			<-done
 		}()
 		reader := bufio.NewReader(server)
-		for range 2 {
-			if _, err := reader.ReadString('\n'); err != nil {
-				t.Fatal(err)
-			}
+		nick := readSessionNick(t, reader)
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatal(err)
 		}
 		for _, welcome := range []bool{false, true} {
 			if welcome {
-				if _, err := io.WriteString(server, ":irc.example.i2p 001 reader :Welcome\r\n"); err != nil {
+				if _, err := io.WriteString(server, ":irc.example.i2p 001 "+nick+" :Welcome\r\n"); err != nil {
 					t.Fatal(err)
 				}
 			}
