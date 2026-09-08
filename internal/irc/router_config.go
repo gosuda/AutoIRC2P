@@ -11,7 +11,9 @@ import (
 	"gosuda.org/ivnp/state"
 )
 
-func loadRouterConfig(path string) (ivnp.Config, error) {
+const maxRouterDestinations = 256
+
+func loadRouterConfig(path string, destinationCapacity int) (ivnp.Config, error) {
 	if err := createRouterConfig(path); err != nil {
 		return ivnp.Config{}, err
 	}
@@ -27,8 +29,11 @@ func loadRouterConfig(path string) (ivnp.Config, error) {
 	if err := errors.Join(readErr, file.Close()); err != nil {
 		return ivnp.Config{}, err
 	}
-	if !routerHopsConfigured(string(contents)) {
+	if !routerSettingConfigured(string(contents), "tunnel", "hops") {
 		configuration.Tunnel.Hops = 1
+	}
+	if !routerSettingConfigured(string(contents), "state", "max_destinations") {
+		configuration.State.MaxDestinations = max(configuration.State.MaxDestinations, destinationCapacity)
 	}
 	return configuration, nil
 }
@@ -61,7 +66,7 @@ func createRouterConfig(path string) error {
 
 // IVNP validates the INI but does not expose key presence or configurable defaults.
 // Inspect only section/key names; values and syntax remain IVNP's responsibility.
-func routerHopsConfigured(text string) bool {
+func routerSettingConfigured(text, wantedSection, wantedKey string) bool {
 	section := ""
 	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -70,9 +75,9 @@ func routerHopsConfigured(text string) bool {
 			section = strings.TrimSpace(name)
 			continue
 		}
-		if section == "tunnel" {
+		if section == wantedSection {
 			key, _, found := strings.Cut(line, "=")
-			if found && strings.TrimSpace(key) == "hops" {
+			if found && strings.TrimSpace(key) == wantedKey {
 				return true
 			}
 		}

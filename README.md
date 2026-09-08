@@ -132,7 +132,7 @@ Existing explicit hop settings are preserved. One hop offers less anonymity marg
 
 Configured tunnel pool capacities are preserved. IVNP removes replaced tunnels from selection but retains their execution state until the original advertised expiration, so renewal does not interrupt peers still using cached leases.
 
-The default `IRC_MAX_ACCOUNTS=16` reserves capacity for 52 destinations, including the reader pool and IVNP's default destination. IVNP's 64-destination limit allows at most 20 registered accounts with three-entry pools; a lower configured destination limit reduces that maximum.
+The default `IRC_MAX_ACCOUNTS=16` requires capacity for 52 destinations, including the reader pool and IVNP's default destination. If `[state] max_destinations` is omitted, embedded capacity grows with the account limit, up to 256 destinations (84 accounts). Explicit destination limits are preserved. For example, `IRC_MAX_ACCOUNTS=62` requires 190 destinations; pools are created only for active accounts.
 
 ## Updates and data
 

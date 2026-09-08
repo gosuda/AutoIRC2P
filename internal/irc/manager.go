@@ -128,6 +128,9 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	if cfg.MaxAccounts == 0 {
 		cfg.MaxAccounts = 16
 	}
+	if cfg.MaxAccounts > (maxRouterDestinations-1)/DestinationPoolSize-1 {
+		return nil, fmt.Errorf("IRC account limit exceeds %d-destination pool capacity: %w", maxRouterDestinations, errInvalidConfig)
+	}
 	if cfg.AccountIdleGrace == 0 {
 		cfg.AccountIdleGrace = 2 * time.Minute
 	}
@@ -141,7 +144,8 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 		}
 		rooms[fold(room)] = room
 	}
-	configuration, err := loadRouterConfig(cfg.ConfigPath)
+	destinationCapacity := (cfg.MaxAccounts+1)*DestinationPoolSize + 1
+	configuration, err := loadRouterConfig(cfg.ConfigPath, destinationCapacity)
 	if err != nil {
 		return nil, fmt.Errorf("load IVNP configuration: %w", err)
 	}

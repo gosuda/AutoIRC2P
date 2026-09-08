@@ -7,7 +7,7 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/rs/zerolog v1.35.1
 	golang.org/x/sys v0.47.0
-	gosuda.org/ivnp v0.0.0-20260907162947-a68db3875a8f
+	gosuda.org/ivnp v0.0.0-20260908021104-c34841c7f92d
 	gosuda.org/portalite v0.0.0-20260826135640-1f955935677b
 	modernc.org/sqlite v1.58.0
 )

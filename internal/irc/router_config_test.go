@@ -12,7 +12,7 @@ func TestLoadRouterConfigCreatesPrivateConfigAndParents(t *testing.T) {
 	root := t.TempDir()
 	parent := filepath.Join(root, "private", "router")
 	path := filepath.Join(parent, "ivnp.conf")
-	configuration, err := loadRouterConfig(path)
+	configuration, err := loadRouterConfig(path, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestLoadRouterConfigPreservesExistingSettings(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
 				t.Fatal(err)
 			}
-			configuration, err := loadRouterConfig(path)
+			configuration, err := loadRouterConfig(path, 64)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -88,7 +88,7 @@ func TestLoadRouterConfigRejectsInvalidExplicitHops(t *testing.T) {
 	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadRouterConfig(path); err == nil {
+	if _, err := loadRouterConfig(path, 64); err == nil {
 		t.Fatal("invalid explicit hops accepted as an application default")
 	}
 	contents, err := os.ReadFile(path)
@@ -111,7 +111,7 @@ func TestLoadRouterConfigRejectsSymlinkWithoutReplacingTarget(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadRouterConfig(path); err == nil {
+	if _, err := loadRouterConfig(path, 64); err == nil {
 		t.Fatal("symlink configuration accepted")
 	}
 	contents, err := os.ReadFile(target)
@@ -120,5 +120,34 @@ func TestLoadRouterConfigRejectsSymlinkWithoutReplacingTarget(t *testing.T) {
 	}
 	if string(contents) != text {
 		t.Errorf("symlink target was replaced: %q", contents)
+	}
+}
+
+func TestLoadRouterConfigSizesAccountPoolsWithoutOverridingOperatorLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		want int
+	}{
+		{"automatic capacity", "[tunnel]\nhops = 1\n", 190},
+		{"explicit smaller limit", "[state]\nmax_destinations = 64\n", 64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ivnp.conf")
+			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			configuration, err := loadRouterConfig(path, (62+1)*DestinationPoolSize+1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if configuration.State.MaxDestinations != tc.want {
+				t.Fatalf("effective destination capacity = %d, want %d", configuration.State.MaxDestinations, tc.want)
+			}
+			contents, err := os.ReadFile(path)
+			if err != nil || string(contents) != tc.text {
+				t.Fatalf("operator configuration changed: %q, %v", contents, err)
+			}
+		})
 	}
 }
