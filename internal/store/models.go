@@ -9,8 +9,6 @@ type Message struct {
 	Room            string `json:"room"`
 	Nick            string `json:"nick"`
 	Original        string `json:"original"`
-	SourceLanguage  string `json:"source_language"`
-	WireLanguage    string `json:"wire_language"`
 	Service         int64  `json:"service"`
 	CreatedAt       int64  `json:"created_at"`
 	SenderUserID    int64  `json:"sender_user_id"`

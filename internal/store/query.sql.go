@@ -10,15 +10,13 @@ import (
 )
 
 const addMessage = `-- name: AddMessage :one
-INSERT INTO messages (room,nick,original,source_language,wire_language,service,created_at,sender_user_id,sender_request_id) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id, room, nick, original, source_language, wire_language, service, created_at, sender_user_id, sender_request_id
+INSERT INTO messages (room,nick,original,service,created_at,sender_user_id,sender_request_id) VALUES (?,?,?,?,?,?,?) RETURNING id, room, nick, original, service, created_at, sender_user_id, sender_request_id
 `
 
 type AddMessageParams struct {
 	Room            string `json:"room"`
 	Nick            string `json:"nick"`
 	Original        string `json:"original"`
-	SourceLanguage  string `json:"source_language"`
-	WireLanguage    string `json:"wire_language"`
 	Service         int64  `json:"service"`
 	CreatedAt       int64  `json:"created_at"`
 	SenderUserID    int64  `json:"sender_user_id"`
@@ -30,8 +28,6 @@ func (q *Queries) AddMessage(ctx context.Context, arg AddMessageParams) (Message
 		arg.Room,
 		arg.Nick,
 		arg.Original,
-		arg.SourceLanguage,
-		arg.WireLanguage,
 		arg.Service,
 		arg.CreatedAt,
 		arg.SenderUserID,
@@ -43,8 +39,6 @@ func (q *Queries) AddMessage(ctx context.Context, arg AddMessageParams) (Message
 		&i.Room,
 		&i.Nick,
 		&i.Original,
-		&i.SourceLanguage,
-		&i.WireLanguage,
 		&i.Service,
 		&i.CreatedAt,
 		&i.SenderUserID,
@@ -475,7 +469,7 @@ func (q *Queries) ListSends(ctx context.Context, arg ListSendsParams) ([]SendReq
 }
 
 const messages = `-- name: Messages :many
-SELECT id, room, nick, original, source_language, wire_language, service, created_at, sender_user_id, sender_request_id FROM messages WHERE room = ? AND id < ? ORDER BY id DESC LIMIT 100
+SELECT id, room, nick, original, service, created_at, sender_user_id, sender_request_id FROM messages WHERE room = ? AND id < ? ORDER BY id DESC LIMIT 100
 `
 
 type MessagesParams struct {
@@ -497,8 +491,6 @@ func (q *Queries) Messages(ctx context.Context, arg MessagesParams) ([]Message, 
 			&i.Room,
 			&i.Nick,
 			&i.Original,
-			&i.SourceLanguage,
-			&i.WireLanguage,
 			&i.Service,
 			&i.CreatedAt,
 			&i.SenderUserID,
@@ -672,33 +664,6 @@ UPDATE users SET irc_registered = 1 WHERE id = ?
 func (q *Queries) RegisterIRC(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, registerIRC, id)
 	return err
-}
-
-const roomLanguages = `-- name: RoomLanguages :many
-SELECT wire_language FROM messages WHERE room = ? AND service = 0 ORDER BY id DESC LIMIT 100
-`
-
-func (q *Queries) RoomLanguages(ctx context.Context, room string) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, roomLanguages, room)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []string{}
-	for rows.Next() {
-		var wire_language string
-		if err := rows.Scan(&wire_language); err != nil {
-			return nil, err
-		}
-		items = append(items, wire_language)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const saveTranslation = `-- name: SaveTranslation :exec

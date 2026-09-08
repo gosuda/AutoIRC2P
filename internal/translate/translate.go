@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	promptVersion    = "irc-v1"
+	promptVersion    = "irc-v2"
 	operationTimeout = 90 * time.Second
 	failureTTL       = 15 * time.Second
 	maxFailures      = 512

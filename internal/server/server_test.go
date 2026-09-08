@@ -141,7 +141,6 @@ func TestHTTPOnlyExplicitAuthenticatedSendReachesIRC(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	// The first Latin-language detection lazily loads model data under -race.
 	if err := conn.SetReadDeadline(time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -158,84 +157,108 @@ func TestHTTPOnlyExplicitAuthenticatedSendReachesIRC(t *testing.T) {
 			break
 		}
 	}
-	if f.Message == nil || f.Message.Original != "안녕하세요 여러분." || f.Message.SourceLanguage != "ko" {
+	if f.Message == nil || f.Message.Original != "안녕하세요 여러분." {
 		data, _ := json.Marshal(f)
 		t.Fatalf("original lost on observer echo: %s", data)
 	}
-	langs, err := q.RoomLanguages(ctx, "#private-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(langs) != 1 || langs[0] != "en" {
-		t.Fatalf("room counted local original instead of wire language: %v", langs)
-	}
 }
 
-func TestOriginalReaderReceivesHistoryAndLiveMessages(t *testing.T) {
-	app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { defer close(done); app.Run(ctx) }()
-	t.Cleanup(func() { cancel(); <-done })
-	server := httptest.NewServer(app.Handler())
-	t.Cleanup(server.Close)
-	original := "안녕하세요 여러분."
-	if _, err := app.q.AddMessage(ctx, store.AddMessageParams{Room: "#one", Nick: "bob", Original: original, SourceLanguage: "ko", WireLanguage: "ko", CreatedAt: time.Now().UnixMilli()}); err != nil {
-		t.Fatal(err)
+func TestReaderLanguageControlsHistoryAndLiveTranslation(t *testing.T) {
+	cases := []struct{ lang, translation string }{
+		{"original", ""},
+		{"en", "Hello, everyone."},
+		{"ko", "안녕하세요 여러분."},
 	}
-	response := httptest.NewRecorder()
-	app.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/messages?room=%23one&lang=original", nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("history status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var history struct{ Messages []Message }
-	if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
-		t.Fatal(err)
-	}
-	if len(history.Messages) != 1 {
-		t.Fatalf("history messages = %d, want 1", len(history.Messages))
-	}
-	assertOriginal := func(msg *Message) {
-		t.Helper()
-		if msg == nil || msg.Original != original || msg.Translation != "" || msg.TargetLanguage != "" || msg.TranslationState != "excluded" {
-			t.Fatalf("original-only message = %+v", msg)
-		}
-	}
-	assertOriginal(&history.Messages[0])
-	conn, responseWS, err := websocket.DefaultDialer.Dial(strings.Replace(server.URL, "http", "ws", 1)+"/api/ws?room=%23one&lang=original", http.Header{"Origin": []string{"https://chat.example"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if responseWS.Body != nil {
-		if err := responseWS.Body.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Cleanup(func() {
-		if err := conn.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	if err := conn.SetReadDeadline(time.Now().Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	var event frame
-	if err := conn.ReadJSON(&event); err != nil {
-		t.Fatal(err)
-	}
-	app.Event(ctx, irc.Event{Kind: "message", Room: "#one", Nick: "bob", Text: original})
-	for {
-		if err := conn.ReadJSON(&event); err != nil {
-			t.Fatal(err)
-		}
-		if event.Type == "message" {
-			assertOriginal(event.Message)
-			break
-		}
-	}
-	cancel()
-	<-done
-	if calls := app.translator.(*translationStub).calls.Load(); calls != 0 {
-		t.Fatalf("original-only reader invoked translator %d times", calls)
+	for _, tc := range cases {
+		t.Run(tc.lang, func(t *testing.T) {
+			app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
+			var calls atomic.Int64
+			app.translator = translationFunc(func(_ context.Context, text, target string) (string, error) {
+				calls.Add(1)
+				if target == "ko" {
+					return text, nil
+				}
+				return "Hello, everyone.", nil
+			})
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() { defer close(done); app.Run(ctx) }()
+			t.Cleanup(func() { cancel(); <-done })
+			server := httptest.NewServer(app.Handler())
+			t.Cleanup(server.Close)
+			original := "안녕하세요 여러분."
+			if _, err := app.q.AddMessage(ctx, store.AddMessageParams{Room: "#one", Nick: "bob", Original: original, CreatedAt: time.Now().UnixMilli()}); err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			app.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/messages?room=%23one&lang="+tc.lang, nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("history status = %d, body = %s", response.Code, response.Body.String())
+			}
+			var history struct{ Messages []Message }
+			if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
+				t.Fatal(err)
+			}
+			if len(history.Messages) != 1 {
+				t.Fatalf("history messages = %d, want 1", len(history.Messages))
+			}
+			state, target := "pending", tc.lang
+			if tc.lang == "original" {
+				state, target = "excluded", ""
+			}
+			assertInitial := func(msg *Message) {
+				t.Helper()
+				if msg == nil || msg.Original != original || msg.Translation != "" || msg.TargetLanguage != target || msg.TranslationState != state {
+					t.Fatalf("initial message = %+v, want target %q and state %q", msg, target, state)
+				}
+			}
+			assertInitial(&history.Messages[0])
+			conn, responseWS, err := websocket.DefaultDialer.Dial(strings.Replace(server.URL, "http", "ws", 1)+"/api/ws?room=%23one&lang="+tc.lang, http.Header{"Origin": []string{"https://chat.example"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if responseWS.Body != nil {
+				if err := responseWS.Body.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Cleanup(func() {
+				if err := conn.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			if err := conn.SetReadDeadline(time.Now().Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			var event frame
+			if err := conn.ReadJSON(&event); err != nil {
+				t.Fatal(err)
+			}
+			app.Event(ctx, irc.Event{Kind: "message", Room: "#one", Nick: "bob", Text: original})
+			var liveID int64
+			for {
+				if err := conn.ReadJSON(&event); err != nil {
+					t.Fatal(err)
+				}
+				if event.Type == "message" {
+					assertInitial(event.Message)
+					liveID = event.Message.ID
+					if tc.lang == "original" {
+						break
+					}
+				}
+				if event.Type == "translation" && event.Message != nil && event.Message.ID == liveID {
+					if event.Message.TranslationState != "ready" || event.Message.Translation != tc.translation || event.Message.TargetLanguage != target {
+						t.Fatalf("live translation = %+v, want %q in %q", event.Message, tc.translation, target)
+					}
+					break
+				}
+			}
+			cancel()
+			<-done
+			if tc.lang == "original" && calls.Load() != 0 {
+				t.Fatalf("original-only reader invoked translator %d times", calls.Load())
+			}
+		})
 	}
 }

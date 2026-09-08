@@ -80,7 +80,18 @@ The first I2P connection can take several minutes. **Live feed** means your brow
 
 Rooms appear in a vertically scrollable list from startup, ordered by the latest message. New activity reorders the list without switching your open conversation.
 
-**Auto-translate** in the chat header defaults to **Off**. Off shows the original text and sends messages without translation. On shows translated text and translates outgoing messages into the room language; the original is visible only while translation is pending. Right-click, hold a message for 650ms, or activate its nickname to inspect the original, languages, and timestamp. Escape, Close, or clicking elsewhere dismisses the metadata panel. **Send original** bypasses translation for one message. The setting is saved separately for guests and each account. Off readers do not request history or live-message translations; other readers with On may still request translations of shared messages. NickServ and ChanServ messages are hidden from both history and live chat without disabling service authentication.
+**Auto-translate** defaults to **Off**. Off displays and sends original text. On translates incoming messages into your selected reading language and outgoing messages into the fixed target below. **Send original** bypasses translation for one message. The setting is saved separately for guests and each account.
+
+Outgoing translation targets depend only on the room name, ignoring case:
+
+| Room | Translation target |
+| --- | --- |
+| `#ru` or a name ending in `-ru` | Russian |
+| `#de` or a name ending in `-de` | German |
+| `#ko` | Korean |
+| All other rooms | English |
+
+There is no automatic message-language detection or room-language inference. Open a message's details to see its original text, translation target, and timestamp. NickServ and ChanServ messages remain hidden from chat without disabling service authentication.
 
 The shared router and IRC reader stay active without browser users and retry startup failures and disconnects until the app shuts down. Account sessions also retry nickname conflicts while leased, allowing stale IRC registrations to expire without changing identity. Every retry waits **1 second**; tunnel preparation and network timeouts can take longer. Registered IRC sessions send **PING every 30 seconds** (sooner if half the configured idle timeout is shorter). Incoming traffic, including PONG, keeps the session alive; an unresponsive connection still expires under `IRC_IDLE_TIMEOUT`. Recovery preserves I2P identities and never replays outgoing messages.
 

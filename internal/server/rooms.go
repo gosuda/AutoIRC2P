@@ -67,7 +67,7 @@ func (s *Server) roomStates(userID int64, room string) (string, string) {
 }
 
 func (s *Server) roomMetadata(ctx context.Context, userID int64, name string, cursors map[string]int64) (Room, error) {
-	room := Room{Name: name}
+	room := Room{Name: name, Language: translate.RoomTargetLanguage(name)}
 	room.ReadState, room.SendState = s.roomStates(userID, name)
 	err := s.q.Transaction(ctx, func(q *store.Queries) error {
 		latest, err := q.LatestRoomMessage(ctx, name)
@@ -75,11 +75,6 @@ func (s *Server) roomMetadata(ctx context.Context, userID int64, name string, cu
 			return err
 		}
 		room.LatestMessageID = latest
-		langs, err := q.RoomLanguages(ctx, name)
-		if err != nil {
-			return err
-		}
-		room.Language = translate.RoomLanguage(langs)
 		cursor, exists := cursors[name]
 		if !exists {
 			cursors[name] = latest

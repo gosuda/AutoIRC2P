@@ -12,11 +12,11 @@ const en = {
   passwordNote: 'Your browser derives a sign-in key. The password itself is never sent.',
   working: 'Please wait…', authenticating: 'Securing your session…',
   needAccount: 'New here?', haveAccount: 'Already have an account?',
-  displayLanguage: 'Read translations in', roomLanguage: 'Room language',
+  displayLanguage: 'Read translations in', outgoingLanguage: 'Outgoing translation language',
   autoTranslate: 'Auto-translate', interfaceLanguage: 'Interface language',
   translation: 'Translation', original: 'Original', pending: 'Translation pending…',
   failed: 'Translation unavailable. Open message details to read the original.',
-  excluded: 'Not translated', service: 'Service message · untranslated', unknown: 'Unknown',
+  excluded: 'Not translated', service: 'Service message · untranslated',
   messages: 'Conversation', emptyTitle: 'The conversation starts here.',
   messageDetails: 'Message details', metadataHint: 'Right-click or hold for details',
   emptyDescription: 'No saved messages in this room yet. New messages will appear here.',
@@ -60,11 +60,11 @@ const ko: typeof en = {
   passwordNote: '브라우저에서 로그인 키를 만듭니다. 비밀번호 자체는 전송하지 않습니다.',
   working: '잠시 기다려 주세요…', authenticating: '세션을 보호하는 중…',
   needAccount: '처음 오셨나요?', haveAccount: '이미 계정이 있나요?',
-  displayLanguage: '번역 표시 언어', roomLanguage: '대화방 언어',
+  displayLanguage: '번역 표시 언어', outgoingLanguage: '보내는 메시지 번역 언어',
   autoTranslate: '자동번역', interfaceLanguage: '화면 언어',
   translation: '번역', original: '원문', pending: '번역을 기다리는 중…',
   failed: '번역할 수 없습니다. 메시지 정보에서 원문을 확인하세요.',
-  excluded: '번역하지 않음', service: '서비스 메시지 · 번역하지 않음', unknown: '알 수 없음',
+  excluded: '번역하지 않음', service: '서비스 메시지 · 번역하지 않음',
   messages: '대화', emptyTitle: '여기서 대화를 시작하세요.',
   messageDetails: '메시지 정보', metadataHint: '우클릭하거나 길게 눌러 정보 보기',
   emptyDescription: '아직 저장된 메시지가 없습니다. 새 메시지가 여기에 표시됩니다.',
@@ -99,7 +99,6 @@ const ko: typeof en = {
 export const copy: Record<Language, typeof en> = { en, ko };
 
 export function languageName(code: string, displayLanguage: Language): string {
-  if (!code || code === 'und') return copy[displayLanguage].unknown;
   try {
     return new Intl.DisplayNames([displayLanguage], { type: 'language' }).of(code) ?? code;
   } catch {

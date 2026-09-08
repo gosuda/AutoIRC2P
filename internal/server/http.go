@@ -13,7 +13,6 @@ import (
 
 	"github.com/gosuda/AutoIRC2P/internal/auth"
 	"github.com/gosuda/AutoIRC2P/internal/store"
-	"github.com/gosuda/AutoIRC2P/internal/translate"
 )
 
 func stringID(id int64) string { return strconv.FormatInt(id, 10) }
@@ -146,18 +145,11 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "history unavailable")
 		return
 	}
-	languages, err := s.q.RoomLanguages(r.Context(), room)
-	if err != nil {
-		writeError(w, 500, "room state unavailable")
-		return
-	}
-	roomLanguage := translate.RoomLanguage(languages)
 	messages := make([]Message, 0, len(rows))
 	lang := language(r)
 	viewer, _ := s.currentUser(r)
 	for i := len(rows) - 1; i >= 0; i-- {
 		msg := messageFrom(rows[i], lang)
-		msg.RoomLanguage = roomLanguage
 		messages = append(messages, personalize(msg, viewer.ID))
 	}
 	writeJSON(w, 200, map[string]any{"messages": messages})

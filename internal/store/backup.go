@@ -408,9 +408,12 @@ func validateSchema(ctx context.Context, db *sql.DB, version int) error {
 		"users":         "id,email,nick,password_salt,password_hash,irc_password,identity_keys,identity_address,irc_registered,created_at",
 		"sessions":      "token_hash,user_id,expires_at",
 		"observer":      "id,nick,identity_keys,identity_address",
-		"messages":      "id,room,nick,original,source_language,wire_language,service,created_at",
+		"messages":      "id,room,nick,original,service,created_at",
 		"translations":  "cache_key,translated",
 		"send_requests": "user_id,request_id,state,message_id,room,nick,original,wire_text,created_at,echo_consumed",
+	}
+	if version < 4 {
+		columns["messages"] += ",source_language,wire_language"
 	}
 	if version >= 2 {
 		columns["messages"] += ",sender_user_id,sender_request_id"

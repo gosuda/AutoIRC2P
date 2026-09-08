@@ -14,7 +14,6 @@ import (
 	"github.com/gosuda/AutoIRC2P/internal/auth"
 	"github.com/gosuda/AutoIRC2P/internal/irc"
 	"github.com/gosuda/AutoIRC2P/internal/store"
-	"github.com/gosuda/AutoIRC2P/internal/translate"
 	"github.com/julienschmidt/httprouter"
 	"github.com/rs/zerolog/log"
 )
@@ -39,10 +38,8 @@ type Config struct {
 type Message struct {
 	ID               int64  `json:"id"`
 	Room             string `json:"room"`
-	RoomLanguage     string `json:"roomLanguage,omitempty"`
 	Nick             string `json:"nick"`
 	Original         string `json:"original"`
-	SourceLanguage   string `json:"sourceLanguage"`
 	Translation      string `json:"translation"`
 	TargetLanguage   string `json:"targetLanguage"`
 	TranslationState string `json:"translationState"`
@@ -191,7 +188,7 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 	}
 	if event.Service {
 		s.serviceID--
-		msg := Message{ID: s.serviceID, Room: event.Room, Nick: event.Nick, Original: event.Text, SourceLanguage: "und", Translation: event.Text, TranslationState: "excluded", Service: true, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		msg := Message{ID: s.serviceID, Room: event.Room, Nick: event.Nick, Original: event.Text, Translation: event.Text, TranslationState: "excluded", Service: true, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		s.broadcast(event.Room, "", event.AccountID, frame{Type: "message", Message: &msg})
 		return
 	}
@@ -210,14 +207,13 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		if echoErr != nil && !errors.Is(echoErr, sql.ErrNoRows) {
 			return echoErr
 		}
-		params := store.AddMessageParams{Room: event.Room, Nick: event.Nick, WireLanguage: translate.Detect(event.Text), CreatedAt: time.Now().UnixMilli()}
+		params := store.AddMessageParams{Room: event.Room, Nick: event.Nick, CreatedAt: time.Now().UnixMilli()}
 		if echoErr == nil {
 			original = echo.Original
 			params.SenderUserID = echo.UserID
 			params.SenderRequestID = echo.RequestID
 		}
 		params.Original = original
-		params.SourceLanguage = translate.Detect(original)
 		var err error
 		row, err = q.AddMessage(ctx, params)
 		if err != nil {
@@ -242,14 +238,8 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 	}
 	s.outgoingMu.Unlock()
 	s.refreshRooms(ctx, row.Room, 0)
-	languages, err := s.q.RoomLanguages(ctx, row.Room)
-	if err != nil {
-		log.Error().Err(err).Msg("read room language")
-	}
-	roomLanguage := translate.RoomLanguage(languages)
 	for _, lang := range []string{"en", "ko", "original"} {
 		msg := messageFrom(row, lang)
-		msg.RoomLanguage = roomLanguage
 		s.broadcast(row.Room, lang, 0, frame{Type: "message", Message: &msg})
 		if msg.TranslationState == "pending" && s.hasReaders(row.Room, lang) {
 			s.enqueue(msg, lang)
@@ -257,7 +247,7 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 	}
 }
 func messageFrom(row store.Message, lang string) Message {
-	msg := Message{ID: row.ID, Room: row.Room, Nick: row.Nick, Original: row.Original, SourceLanguage: row.SourceLanguage, TargetLanguage: lang, TranslationState: "pending", CreatedAt: time.UnixMilli(row.CreatedAt).UTC().Format(time.RFC3339Nano), Service: row.Service != 0, senderUserID: row.SenderUserID, senderRequestID: row.SenderRequestID}
+	msg := Message{ID: row.ID, Room: row.Room, Nick: row.Nick, Original: row.Original, TargetLanguage: lang, TranslationState: "pending", CreatedAt: time.UnixMilli(row.CreatedAt).UTC().Format(time.RFC3339Nano), Service: row.Service != 0, senderUserID: row.SenderUserID, senderRequestID: row.SenderRequestID}
 	if lang == "original" {
 		msg.TargetLanguage = ""
 		msg.TranslationState = "excluded"
@@ -265,9 +255,6 @@ func messageFrom(row store.Message, lang string) Message {
 	}
 	if msg.Service {
 		msg.TranslationState = "excluded"
-		msg.Translation = msg.Original
-	} else if row.SourceLanguage == lang {
-		msg.TranslationState = "ready"
 		msg.Translation = msg.Original
 	}
 	return msg

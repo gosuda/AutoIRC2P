@@ -188,15 +188,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	defer releaseAccount()
 	target := ""
 	if !body.Original {
-		langs, err := s.q.RoomLanguages(ctx, body.Room)
-		if err != nil {
-			sendError(w, 500, "send_unavailable", nil)
-			return
-		}
-		target = translate.RoomLanguage(langs)
-		if translate.Detect(body.Text) == target {
-			target = ""
-		}
+		target = translate.RoomTargetLanguage(body.Room)
 	}
 	state := "sending"
 	if target != "" {

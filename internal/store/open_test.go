@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
-	for _, version := range []int{1, 2} {
+	for _, version := range []int{1, 2, 3} {
 		t.Run(fmt.Sprintf("version%d", version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "legacy.sqlite")
 			legacy, err := sql.Open("sqlite", path)
@@ -35,10 +36,24 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			if err != nil {
 				t.Fatal(errors.Join(err, legacy.Close()))
 			}
-			if version == 2 {
+			if version >= 2 {
 				if _, err := legacy.Exec(migration2 + "\nPRAGMA user_version=2;"); err != nil {
 					t.Fatal(errors.Join(err, legacy.Close()))
 				}
+			}
+			lastID := int64(7)
+			if version == 3 {
+				if _, err := legacy.Exec(migration3 + `
+ INSERT INTO messages VALUES(100,'#one','alice','deleted','en','en',0,1000,0,'');
+ DELETE FROM messages WHERE id=100;
+ INSERT INTO send_requests(user_id,request_id,state,message_id,created_at,echo_consumed,original_mode,error_code,updated_at,expires_at,payload_purged) VALUES(1,'purged-request','failed',100,1000,0,1,'translation_failed',2000,122000,1);
+ PRAGMA user_version=3;`); err != nil {
+					t.Fatal(errors.Join(err, legacy.Close()))
+				}
+				lastID = 100
+			}
+			if err := validateSchema(t.Context(), legacy, version); err != nil {
+				t.Fatal(errors.Join(err, legacy.Close()))
 			}
 			if err := legacy.Close(); err != nil {
 				t.Fatal(err)
@@ -52,19 +67,58 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 					t.Error(err)
 				}
 			}()
+			var currentVersion int
+			if err := db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&currentVersion); err != nil {
+				t.Fatal(err)
+			}
+			if currentVersion != 4 {
+				t.Fatalf("database version = %d, want 4", currentVersion)
+			}
+			if err := validateSchema(t.Context(), db, currentVersion); err != nil {
+				t.Fatal(err)
+			}
+			var languageColumns int
+			if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name IN ('source_language','wire_language')").Scan(&languageColumns); err != nil {
+				t.Fatal(err)
+			}
+			if languageColumns != 0 {
+				t.Fatalf("detected language columns remain: %d", languageColumns)
+			}
 			rows, err := q.Messages(t.Context(), MessagesParams{Room: "#one", ID: 8})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(rows) != 1 || rows[0].ID != 7 || rows[0].Original != "original" || rows[0].SenderUserID != 1 || rows[0].SenderRequestID != "confirmed-request" {
-				t.Fatalf("migrated history: %+v", rows)
+			if len(rows) != 1 {
+				t.Fatalf("migrated message count = %d, want 1", len(rows))
+			}
+			message := rows[0]
+			if message.ID != 7 || message.Room != "#one" || message.Nick != "alice" {
+				t.Fatalf("message identity changed: %+v", message)
+			}
+			if message.Original != "original" || message.Service != 0 || message.CreatedAt != 1000 {
+				t.Fatalf("message content changed: %+v", message)
+			}
+			if message.SenderUserID != 1 || message.SenderRequestID != "confirmed-request" {
+				t.Fatalf("message echo ownership changed: %+v", message)
 			}
 			confirmed, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "confirmed-request"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if confirmed.State != "confirmed" || confirmed.MessageID != 7 {
+			if confirmed.State != "confirmed" || confirmed.MessageID != 7 || confirmed.EchoConsumed != 1 {
 				t.Fatalf("lost echo confirmation: %+v", confirmed)
+			}
+			if confirmed.Room != "#one" || confirmed.Nick != "alice" {
+				t.Fatalf("send identity changed: %+v", confirmed)
+			}
+			if confirmed.Original != "original" || confirmed.WireText != "wire" {
+				t.Fatalf("send payload changed: %+v", confirmed)
+			}
+			if confirmed.CreatedAt != 1000 || confirmed.UpdatedAt != 1000 || confirmed.ExpiresAt != 121000 {
+				t.Fatalf("send timestamps changed: %+v", confirmed)
+			}
+			if confirmed.OriginalMode != 0 || confirmed.ErrorCode != "" || confirmed.PayloadPurged != 0 {
+				t.Fatalf("send recovery metadata changed: %+v", confirmed)
 			}
 			pending, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "interrupted-request"})
 			if err != nil {
@@ -73,21 +127,62 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			if pending.State != "unconfirmed" || pending.ErrorCode != "interrupted" {
 				t.Fatalf("interrupted write misrepresented: %+v", pending)
 			}
+			if version == 3 {
+				purged, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "purged-request"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if purged.State != "failed" || purged.MessageID != 100 || purged.OriginalMode != 1 {
+					t.Fatalf("purged send outcome changed: %+v", purged)
+				}
+				if purged.CreatedAt != 1000 || purged.UpdatedAt != 2000 || purged.ExpiresAt != 122000 {
+					t.Fatalf("purged send timestamps changed: %+v", purged)
+				}
+				if purged.ErrorCode != "translation_failed" || purged.PayloadPurged != 1 {
+					t.Fatalf("purged send recovery metadata changed: %+v", purged)
+				}
+				claimed, err := q.ClaimSend(t.Context(), ClaimSendParams{UserID: 1, RequestID: "purged-request", State: "translating"})
+				if err != nil || claimed != 0 {
+					t.Fatalf("purged request reclaimed: count=%d err=%v", claimed, err)
+				}
+			}
 			cached, err := q.GetTranslation(t.Context(), "cache-key")
 			if err != nil || cached != "cached translation" {
 				t.Fatalf("cache lost: %q %v", cached, err)
 			}
 			user, err := q.SessionUser(t.Context(), SessionUserParams{TokenHash: []byte{0xaa}, ExpiresAt: 1000})
-			if err != nil || user.Email != "alice@example.org" {
-				t.Fatalf("session lost: %+v %v", user, err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if user.ID != 1 || user.Email != "alice@example.org" || user.Nick != "alice" {
+				t.Fatalf("account identity changed: %+v", user)
+			}
+			if !bytes.Equal(user.PasswordSalt, []byte{1}) || !bytes.Equal(user.PasswordHash, []byte{2}) {
+				t.Fatal("account password data changed")
+			}
+			if !bytes.Equal(user.IrcPassword, []byte{3}) || !bytes.Equal(user.IdentityKeys, []byte{4}) {
+				t.Fatal("IRC credentials changed")
+			}
+			if user.IdentityAddress != "alice.b32.i2p" || user.IrcRegistered != 1 || user.CreatedAt != 1000 {
+				t.Fatalf("IRC identity metadata changed: %+v", user)
 			}
 			observer, err := q.GetObserver(t.Context())
-			if err != nil || observer.IdentityAddress != "observer.b32.i2p" {
+			if err != nil || observer.Nick != "observer" || !bytes.Equal(observer.IdentityKeys, []byte{5}) || observer.IdentityAddress != "observer.b32.i2p" {
 				t.Fatalf("observer identity lost: %+v %v", observer, err)
 			}
 			retained, err := q.Prune(t.Context(), time.Now(), RetentionPolicy{Translations: time.Hour, BatchSize: 1})
 			if err != nil || retained.TranslationsDeleted != 0 {
 				t.Fatalf("migrated cache prematurely pruned: %+v %v", retained, err)
+			}
+			if _, err := db.ExecContext(t.Context(), "DELETE FROM messages"); err != nil {
+				t.Fatal(err)
+			}
+			message, err = q.AddMessage(t.Context(), AddMessageParams{Room: "#one", Nick: "alice", Original: "after migration", CreatedAt: 2000})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if message.ID <= lastID {
+				t.Fatalf("message cursor regressed: new=%d deleted=%d", message.ID, lastID)
 			}
 		})
 	}

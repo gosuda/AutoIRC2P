@@ -29,10 +29,8 @@ export type Session = {
 export type Message = {
   id: number;
   room: string;
-  roomLanguage?: string;
   nick: string;
   original: string;
-  sourceLanguage: string;
   translation: string;
   targetLanguage: string;
   translationState: 'pending' | 'ready' | 'failed' | 'excluded';

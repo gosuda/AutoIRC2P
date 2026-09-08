@@ -134,8 +134,8 @@
 <div bind:this={metadata} popover="manual" class="message-metadata" role="dialog" aria-label={text.messageDetails}>
   {#if details}
     <header><strong>{text.messageDetails}</strong><button type="button" class="text-button" onclick={hideDetails}>{text.close}</button></header>
-    {#if 'sourceLanguage' in details}
-      <p class="message-language">{languageName(details.sourceLanguage, language)} <span aria-hidden="true">→</span> {languageName(details.targetLanguage || language, language)}</p>
+    {#if autoTranslate && 'targetLanguage' in details && details.targetLanguage}
+      <p class="message-language">{text.translation}: {languageName(details.targetLanguage, language)}</p>
     {/if}
     <time datetime={details.createdAt}>{new Date(details.createdAt).toLocaleString(language)}</time>
     <div class="original-content"><span class="original-label">{text.original}</span><p class="message-original" dir="auto">{details.original}</p></div>
@@ -161,14 +161,14 @@
             {#if message.own}{@render sentCheck()}{/if}
           </header>
           {#if !autoTranslate}
-            <p class="message-translation" lang={message.sourceLanguage || undefined} dir="auto">{message.original}</p>
+            <p class="message-translation" dir="auto">{message.original}</p>
           {:else}
             <div class="translated-content">
               {#if message.translationState === 'ready' && message.translation}
                 <p class="message-translation" lang={message.targetLanguage || language} dir="auto">{message.translation}</p>
               {:else if message.translationState === 'pending'}
                 <p class="translation-status pending">{text.pending}</p>
-                <p class="message-original" lang={message.sourceLanguage || undefined} dir="auto">{message.original}</p>
+                <p class="message-original" dir="auto">{message.original}</p>
               {:else if message.translationState === 'excluded' || message.service}
                 <p class="translation-status">{message.service ? text.service : text.excluded}</p>
               {:else}

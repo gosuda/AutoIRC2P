@@ -62,7 +62,7 @@
   {#if user}
     <div class="composer-heading">
       <label for="message-input">{text.compose} <span class="composer-nick">@{user.nick}</span></label>
-      <span class="room-language">{languageName(room.language, language)}</span>
+      <span class="room-language" title={text.outgoingLanguage}>{languageName(room.language, language)}</span>
     </div>
     <textarea id="message-input" rows="2" value={draft} oninput={(event) => ondraft(event.currentTarget.value)} maxlength="4096" placeholder={`${room.name}…`} aria-invalid={invalidLine} aria-describedby="composer-help composer-error composer-readiness" onkeydown={(event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {

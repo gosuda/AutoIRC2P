@@ -19,11 +19,9 @@ SELECT * FROM observer WHERE id = 1;
 -- name: CreateObserver :exec
 INSERT INTO observer (id,nick,identity_keys,identity_address) VALUES (1,?,?,?);
 -- name: AddMessage :one
-INSERT INTO messages (room,nick,original,source_language,wire_language,service,created_at,sender_user_id,sender_request_id) VALUES (?,?,?,?,?,?,?,?,?) RETURNING *;
+INSERT INTO messages (room,nick,original,service,created_at,sender_user_id,sender_request_id) VALUES (?,?,?,?,?,?,?) RETURNING *;
 -- name: Messages :many
 SELECT * FROM messages WHERE room = ? AND id < ? ORDER BY id DESC LIMIT 100;
--- name: RoomLanguages :many
-SELECT wire_language FROM messages WHERE room = ? AND service = 0 ORDER BY id DESC LIMIT 100;
 -- name: CachedTranslation :one
 SELECT translated FROM translations WHERE cache_key = ?;
 -- name: SaveTranslation :exec

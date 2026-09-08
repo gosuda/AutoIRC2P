@@ -393,7 +393,7 @@
           <div class="room-row" class:selected={candidate.name === roomName}>
             <button type="button" class="room-button" class:selected={candidate.name === roomName} aria-current={candidate.name === roomName ? 'page' : undefined} onclick={() => { roomName = candidate.name; }}>
               <span class="room-name">{candidate.name}</span>
-              {#if candidate.unreadCount > 0}<span class="unread-badge" aria-label={`${candidate.unreadCount} ${text.unread}`}>{candidate.unreadCount > 99 ? '99+' : candidate.unreadCount}</span>{:else}<span class="room-code">{candidate.language.toUpperCase()}</span>{/if}
+              {#if candidate.unreadCount > 0}<span class="unread-badge" aria-label={`${candidate.unreadCount} ${text.unread}`}>{candidate.unreadCount > 99 ? '99+' : candidate.unreadCount}</span>{:else}<span class="room-code" title={`${text.outgoingLanguage}: ${languageName(candidate.language, language)}`}>{candidate.language.toUpperCase()}</span>{/if}
             </button>
             <button type="button" class="favorite-button" aria-pressed={favorites.includes(candidate.name)} aria-label={`${favorites.includes(candidate.name) ? text.removeFavorite : text.addFavorite}: ${candidate.name}`} onclick={() => toggleFavorite(candidate.name)}>
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2 2.5 5.1 5.6.8-4 3.9.9 5.5-5-2.6-5 2.6.9-5.5-4-3.9 5.6-.8Z" /></svg>
@@ -426,7 +426,7 @@
     </header>
     <div class="conversation-status" aria-live="polite">
       <span class="feed-status"><span class="status-dot" class:ready={ready || (!user && subscription === 'live' && room?.readState === 'ready')} aria-hidden="true"></span>{connectionLabel}</span>
-      {#if room}<span>{text.roomLanguage} <strong>{languageName(room.language, language)}</strong></span>{/if}
+      {#if room}<span>{text.outgoingLanguage} <strong>{languageName(room.language, language)}</strong></span>{/if}
       {#if subscription === 'reconnecting' || room?.sendState === 'unavailable' || room?.readState === 'unavailable'}<button type="button" class="text-button connection-retry" disabled={restoring} onclick={() => void restoreSession()}>{text.retry}</button>{/if}
       <span class="read-mode">{user ? `@${user.nick}` : text.guest}</span>
     </div>

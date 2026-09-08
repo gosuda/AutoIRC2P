@@ -2,14 +2,9 @@ Translation prompt and randomized-boundary extraction adapted from:
 https://github.com/gosuda/website/blob/1ff0800ba61bae023d0e7c84354dc79bbb27f861/internal/translate/translate.go
 https://github.com/gosuda/deeplingua/blob/08344e56052440c4123998993d141bd58cff022b/internal/translate/translate.go
 
-Language detector configuration and ISO mapping adapted from:
-https://github.com/gosuda/website/blob/1ff0800ba61bae023d0e7c84354dc79bbb27f861/llm.go
-https://github.com/gosuda/website/blob/1ff0800ba61bae023d0e7c84354dc79bbb27f861/utils.go
-
 Changes: natural IRC tone, HTTP chat completions, stricter extraction, protected
 URL/code tokens, bounded attempts, pacing, model circuits, persistent caching,
-independent waiter cancellation, Czech mapping, and unknown-language handling.
-The language recognition model itself is supplied by github.com/pemistahl/lingua-go.
+independent waiter cancellation.
 
 MIT License
 

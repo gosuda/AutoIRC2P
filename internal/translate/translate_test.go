@@ -324,27 +324,28 @@ func TestDroppedProtectedContentRejectsTranslation(t *testing.T) {
 	})
 }
 
-func TestRoomLanguageRequiresRecentStrongEvidence(t *testing.T) {
-	cases := []struct{ name, votes, want string }{
-		{"minimum not reached", strings.Repeat("de ", 19), "en"},
-		{"exact threshold", strings.Repeat("ru ", 12) + strings.Repeat("en ", 8), "ru"},
-		{"below threshold", strings.Repeat("de ", 11) + strings.Repeat("en ", 9), "en"},
-		{"unknowns not votes", strings.Repeat("de ", 20) + strings.Repeat("und ", 40), "de"},
-		{"old votes expire", strings.Repeat("ru ", 100) + strings.Repeat("en ", 100), "en"},
+func TestRoomTargetLanguage(t *testing.T) {
+	cases := []struct{ name, room, want string }{
+		{"Russian room", "#ru", "ru"},
+		{"Russian suffix", "#i2p-ru", "ru"},
+		{"German room", "#de", "de"},
+		{"German suffix", "#i2p-de", "de"},
+		{"Korean room", "#ko", "ko"},
+		{"Korean suffix is not a target", "#i2p-ko", "en"},
+		{"case insensitive room", "#KO", "ko"},
+		{"case insensitive Russian suffix", "#I2P-RU", "ru"},
+		{"case insensitive German suffix", "#I2P-De", "de"},
+		{"suffix must end room", "#i2p-ru-chat", "en"},
+		{"suffix needs separator", "#i2pru", "en"},
+		{"other language suffix", "#i2p-fr", "en"},
+		{"other room", "#i2p", "en"},
+		{"empty room", "", "en"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := translate.RoomLanguage(strings.Fields(tc.votes)); got != tc.want {
-				t.Fatalf("room language = %s, want %s", got, tc.want)
+			if got := translate.RoomTargetLanguage(tc.room); got != tc.want {
+				t.Fatalf("RoomTargetLanguage(%q) = %q, want %q", tc.room, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestDetectorDoesNotCountCodeOrURLsAsLanguage(t *testing.T) {
-	for _, text := range []string{"https://example.org/this-is-not-a-message", "`the code is not English conversation`", "1234 :)"} {
-		if got := translate.Detect(text); got != "und" {
-			t.Fatalf("Detect(%q) = %s, want und", text, got)
-		}
 	}
 }

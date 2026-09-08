@@ -183,11 +183,26 @@ func TestRoomLosingReadinessDuringTranslationDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestTranslatedSendInTargetLanguageDoesNotBypassProviderFailure(t *testing.T) {
+	bridge := &lifecycleBridge{state: irc.RoomReady, send: func(context.Context, int64, string, string) error {
+		t.Fatal("wire send after translation failure")
+		return nil
+	}}
+	app, _, token := lifecycleServer(t, bridge)
+	app.translator = translationFunc(func(context.Context, string, string) (string, error) {
+		return "", context.DeadlineExceeded
+	})
+	response, outgoing := postOutgoing(t, app, token, "This message is already written in English.", "same_language_request_01", false)
+	if response.Code != http.StatusServiceUnavailable || outgoing.State != "failed" || outgoing.ErrorCode != "translation_failed" {
+		t.Fatalf("translation failure: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestReadCursorCountsMessagesAndNeverMovesBackward(t *testing.T) {
 	app, user, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
 	add := func(room string, sender, service int64) int64 {
 		t.Helper()
-		row, err := app.q.AddMessage(t.Context(), store.AddMessageParams{Room: room, Nick: "someone", Original: "hello", SourceLanguage: "en", WireLanguage: "en", CreatedAt: time.Now().UnixMilli(), SenderUserID: sender, Service: service})
+		row, err := app.q.AddMessage(t.Context(), store.AddMessageParams{Room: room, Nick: "someone", Original: "hello", CreatedAt: time.Now().UnixMilli(), SenderUserID: sender, Service: service})
 		if err != nil {
 			t.Fatal(err)
 		}
