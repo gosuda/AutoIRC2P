@@ -809,12 +809,12 @@ func (q *Queries) UnreadMessages(ctx context.Context, arg UnreadMessagesParams) 
 	return count, err
 }
 
-const userByEmail = `-- name: UserByEmail :one
-SELECT id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, identity_pool, irc_registered, created_at FROM users WHERE email = ?
+const userByID = `-- name: UserByID :one
+SELECT id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, identity_pool, irc_registered, created_at FROM users WHERE id = ?
 `
 
-func (q *Queries) UserByEmail(ctx context.Context, email string) (User, error) {
-	row := q.db.QueryRowContext(ctx, userByEmail, email)
+func (q *Queries) UserByID(ctx context.Context, id int64) (User, error) {
+	row := q.db.QueryRowContext(ctx, userByID, id)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -832,12 +832,12 @@ func (q *Queries) UserByEmail(ctx context.Context, email string) (User, error) {
 	return i, err
 }
 
-const userByID = `-- name: UserByID :one
-SELECT id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, identity_pool, irc_registered, created_at FROM users WHERE id = ?
+const userByNick = `-- name: UserByNick :one
+SELECT id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, identity_pool, irc_registered, created_at FROM users WHERE nick = ?
 `
 
-func (q *Queries) UserByID(ctx context.Context, id int64) (User, error) {
-	row := q.db.QueryRowContext(ctx, userByID, id)
+func (q *Queries) UserByNick(ctx context.Context, nick string) (User, error) {
+	row := q.db.QueryRowContext(ctx, userByNick, nick)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -864,4 +864,43 @@ func (q *Queries) UserIdentityPool(ctx context.Context, id int64) ([]byte, error
 	var identity_pool []byte
 	err := row.Scan(&identity_pool)
 	return identity_pool, err
+}
+
+const usersForPrewarm = `-- name: UsersForPrewarm :many
+SELECT users.id, users.email, users.nick, users.password_salt, users.password_hash, users.irc_password, users.identity_keys, users.identity_address, users.identity_pool, users.irc_registered, users.created_at FROM users LEFT JOIN sessions ON sessions.user_id = users.id GROUP BY users.id ORDER BY MAX(sessions.expires_at) DESC, users.id DESC LIMIT 2
+`
+
+func (q *Queries) UsersForPrewarm(ctx context.Context) ([]User, error) {
+	rows, err := q.db.QueryContext(ctx, usersForPrewarm)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []User{}
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Nick,
+			&i.PasswordSalt,
+			&i.PasswordHash,
+			&i.IrcPassword,
+			&i.IdentityKeys,
+			&i.IdentityAddress,
+			&i.IdentityPool,
+			&i.IrcRegistered,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

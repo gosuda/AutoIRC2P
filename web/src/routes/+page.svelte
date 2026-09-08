@@ -27,6 +27,10 @@
   let search = $state('');
   let showAll = $state(true);
   let favoritesOnly = $state(false);
+  let mobile = $state(false);
+  let roomsOpen = $state(false);
+  let roomDrawer: HTMLDialogElement;
+  let swipe: { id: number; x: number; y: number; time: number; open: boolean } | undefined;
   let favorites = $state<string[]>([]);
   let cursors = $state<Cursors>({});
   let storageError = $state(false);
@@ -90,6 +94,53 @@
     } catch { storageError = true; }
   }
 
+  function mostRecentRoomName(): string {
+    return rooms.reduce<Room | undefined>((latest, candidate) => !latest || candidate.latestMessageId > latest.latestMessageId ? candidate : latest, undefined)?.name ?? '';
+  }
+
+  function openRoomList() {
+    if (!mobile || roomDrawer.open || authMode) return;
+    roomDrawer.showModal();
+    roomsOpen = true;
+  }
+
+  function closeRoomList() {
+    roomDrawer.close();
+    roomsOpen = false;
+    swipe = undefined;
+  }
+
+  function selectRoom(name: string) {
+    roomName = name;
+    closeRoomList();
+  }
+
+  function startSwipe(event: PointerEvent) {
+    swipe = undefined;
+    if (!mobile || !event.isPrimary || event.button !== 0) return;
+    if (roomDrawer.open && event.target === roomDrawer) {
+      closeRoomList();
+      return;
+    }
+    if (event.pointerType !== 'touch' || authMode || !(event.target instanceof Element)) return;
+    if (event.target.closest('input, textarea, select, button, a, summary, [contenteditable], [popover]')) return;
+    swipe = { id: event.pointerId, x: event.clientX, y: event.clientY, time: event.timeStamp, open: roomsOpen };
+  }
+
+  function finishSwipe(event: PointerEvent) {
+    const start = swipe;
+    swipe = undefined;
+    if (!start || start.id !== event.pointerId || event.timeStamp - start.time > 700 || window.getSelection()?.toString()) return;
+    const dx = event.clientX - start.x;
+    const dy = event.clientY - start.y;
+    if (Math.abs(dx) < 64 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    if (start.open) {
+      if (dx < 0) closeRoomList();
+    } else if (dx < 0 || (start.x <= 32 && dx > 0)) {
+      openRoomList();
+    }
+  }
+
   function switchAccount(next: User | null) {
     if (preferencesKey && user?.id === next?.id) { user = next; return; }
     active?.stop();
@@ -122,7 +173,7 @@
       autoTranslatePreference = stored.autoTranslate;
       storageError = false;
     } catch { storageError = true; }
-    roomName = favorites[0] ?? rooms[0]?.name ?? '';
+    roomName = mostRecentRoomName();
     reconnectVersion++;
   }
 
@@ -192,7 +243,7 @@
       const snapshot = await request<{ rooms: Room[] }>(`/api/rooms?${new URLSearchParams({ cursors: JSON.stringify(cursors) })}`, { signal });
       if (signal.aborted) return;
       receiveRooms(snapshot.rooms, true);
-      if (!rooms.some((candidate) => candidate.name === roomName)) roomName = rooms[0]?.name ?? '';
+      if (!initialized || !rooms.some((candidate) => candidate.name === roomName)) roomName = mostRecentRoomName();
       initialized = true;
       reconnectVersion++;
     } catch (error) {
@@ -204,6 +255,13 @@
 
   onMount(() => {
     language = navigator.language.toLowerCase().startsWith('en') ? 'en' : 'ko';
+    const mobileQuery = window.matchMedia('(max-width: 47.999rem)');
+    const updateViewport = () => {
+      mobile = mobileQuery.matches;
+      if (!mobile) closeRoomList();
+    };
+    updateViewport();
+    mobileQuery.addEventListener('change', updateViewport);
     void restoreSession();
     const storageChanged = (event: StorageEvent) => {
       if (event.key === 'autoirc2p:session-change') { refreshAccount(); return; }
@@ -225,6 +283,7 @@
       accountController.abort();
       active?.stop();
       window.removeEventListener('storage', storageChanged);
+      mobileQuery.removeEventListener('change', updateViewport);
     };
   });
 
@@ -380,10 +439,15 @@
   <meta name="description" content={translationEnabled ? 'Conversations with translations and original messages side by side.' : 'Conversations across IRC rooms.'} />
 </svelte:head>
 
+<svelte:window onpointerdown={startSwipe} onpointerup={finishSwipe} onpointercancel={() => { swipe = undefined; }} />
+
 <a class="skip-link" href="#conversation">{text.messages}</a>
 <div class="workspace">
-  <aside class="sidebar" aria-label={text.rooms}>
-    <a class="brand" href="/" aria-label="AutoIRC2P"><span class="brand-symbol" aria-hidden="true">a/</span><span>AutoIRC<span class="brand-suffix">2P</span></span></a>
+  {#snippet sidebarContent(drawer: boolean)}
+    <div class="sidebar-topline">
+      <a class="brand" href="/" aria-label="AutoIRC2P"><span class="brand-symbol" aria-hidden="true">a/</span><span>AutoIRC<span class="brand-suffix">2P</span></span></a>
+      {#if drawer}<button type="button" class="text-button drawer-close" onclick={closeRoomList} aria-label={text.close}><span aria-hidden="true">×</span></button>{/if}
+    </div>
     <div class="sidebar-section room-navigation">
       <h2>{text.rooms}</h2>
       <label class="room-search"><span class="sr-only">{text.searchRooms}</span><input type="search" bind:value={search} placeholder={text.searchRooms} /></label>
@@ -394,7 +458,7 @@
       <nav aria-label={text.rooms}>
         {#each visibleRooms as candidate (candidate.name)}
           <div class="room-row" class:selected={candidate.name === roomName}>
-            <button type="button" class="room-button" class:selected={candidate.name === roomName} aria-current={candidate.name === roomName ? 'page' : undefined} onclick={() => { roomName = candidate.name; }}>
+            <button type="button" class="room-button" class:selected={candidate.name === roomName} aria-current={candidate.name === roomName ? 'page' : undefined} onclick={() => selectRoom(candidate.name)}>
               <span class="room-name">{candidate.name}</span>
               {#if candidate.unreadCount > 0}<span class="unread-badge" aria-label={`${candidate.unreadCount} ${text.unread}`}>{candidate.unreadCount > 99 ? '99+' : candidate.unreadCount}</span>{:else if translationEnabled}<span class="room-code" title={`${text.outgoingLanguage}: ${languageName(candidate.language, language)}`}>{candidate.language.toUpperCase()}</span>{/if}
             </button>
@@ -415,10 +479,15 @@
       <p class="network-detail">{network.detail || text.connectionNote}</p>
       <button type="button" class="text-button refresh-button" disabled={restoring} onclick={() => void restoreSession()}>{text.refreshSession}</button>
     </details>
-  </aside>
+  {/snippet}
+  <aside class="sidebar desktop-sidebar" aria-label={text.rooms}>{@render sidebarContent(false)}</aside>
+  <dialog id="room-drawer" bind:this={roomDrawer} class="room-drawer" aria-label={text.rooms} oncancel={(event) => { event.preventDefault(); closeRoomList(); }} onclose={() => { roomsOpen = false; }}>
+    <div class="sidebar drawer-sidebar">{@render sidebarContent(true)}</div>
+  </dialog>
 
   <main id="conversation" class="conversation" tabindex="-1">
     <header class="workspace-header">
+      <button type="button" class="mobile-room-menu text-button" aria-label={text.rooms} aria-controls="room-drawer" aria-expanded={roomsOpen} onclick={openRoomList}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg></button>
       <div class="room-heading"><span class="context-label">{text.selectedRoom}</span><h1>{roomName || 'AutoIRC2P'}</h1></div>
       <div class="header-controls">
         {#if translationEnabled}<button type="button" class="account-button" role="switch" aria-checked={autoTranslate} aria-label={text.autoTranslate} onclick={() => { autoTranslatePreference = !autoTranslatePreference; persistPreferences(); }}>{text.autoTranslate} {autoTranslate ? 'On' : 'Off'}</button>{/if}

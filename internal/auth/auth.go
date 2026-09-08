@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net/mail"
 	"regexp"
 	"strings"
 	"time"
@@ -36,12 +35,11 @@ var (
 )
 
 type User struct {
-	ID    int64  `json:"id"`
-	Email string `json:"email"`
-	Nick  string `json:"nick"`
+	ID   int64  `json:"id"`
+	Nick string `json:"nick"`
 }
 
-func Public(u store.User) User { return User{ID: u.ID, Email: u.Email, Nick: u.Nick} }
+func Public(u store.User) User { return User{ID: u.ID, Nick: u.Nick} }
 
 type Service struct {
 	q    *store.Queries
@@ -60,11 +58,27 @@ func New(q *store.Queries, key []byte) (*Service, error) {
 	}
 	return &Service{q: q, key: append([]byte(nil), key...), aead: aead}, nil
 }
-func NormalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
-func (s *Service) Salt(email string) string {
+func (s *Service) syntheticEmail(nick string) string {
 	mac := hmac.New(sha256.New, s.key)
-	mac.Write([]byte("browser-salt\x00" + NormalizeEmail(email)))
-	return hex.EncodeToString(mac.Sum(nil)[:16])
+	mac.Write([]byte("synthetic-email\x00"))
+	mac.Write([]byte(strings.ToLower(strings.TrimSpace(nick))))
+	return hex.EncodeToString(mac.Sum(nil)[:15]) + "@gmail.com"
+}
+func (s *Service) Salt(ctx context.Context, nick string) (string, error) {
+	nick = strings.TrimSpace(nick)
+	user, err := s.q.UserByNick(ctx, nick)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	email := user.Email
+	if errors.Is(err, sql.ErrNoRows) {
+		email = s.syntheticEmail(nick)
+	}
+	// Stored emails bind existing browser proofs and must keep their original salt.
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte("browser-salt\x00"))
+	mac.Write([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return hex.EncodeToString(mac.Sum(nil)[:16]), nil
 }
 func PasswordDigest(salt, derived []byte) []byte {
 	h := sha256.New()
@@ -86,16 +100,16 @@ func (s *Service) Open(value []byte, purpose string) ([]byte, error) {
 	return s.aead.Open(nil, nil, value, []byte(purpose))
 }
 func Token() string { var b [32]byte; rand.Read(b[:]); return hex.EncodeToString(b[:]) }
-func (s *Service) Register(ctx context.Context, email, nick, proof string) (store.User, error) {
-	email = NormalizeEmail(email)
+func (s *Service) Register(ctx context.Context, nick, proof string) (store.User, error) {
+	nick = strings.TrimSpace(nick)
 	derived, err := decodeProof(proof)
 	if err != nil {
 		return store.User{}, err
 	}
-	address, err := mail.ParseAddress(email)
-	if err != nil || address.Address != email || len(email) > 254 || !nickPattern.MatchString(nick) || IsServiceNick(nick) {
+	if !nickPattern.MatchString(nick) || IsServiceNick(nick) {
 		return store.User{}, ErrInput
 	}
+	email := s.syntheticEmail(nick)
 	identity, err := irc.GenerateIdentity()
 	if err != nil {
 		return store.User{}, err
@@ -120,12 +134,12 @@ func IsServiceNick(nick string) bool {
 	}
 	return false
 }
-func (s *Service) Login(ctx context.Context, email, proof string) (store.User, error) {
+func (s *Service) Login(ctx context.Context, nick, proof string) (store.User, error) {
 	derived, err := decodeProof(proof)
 	if err != nil {
 		return store.User{}, ErrCredentials
 	}
-	user, err := s.q.UserByEmail(ctx, NormalizeEmail(email))
+	user, err := s.q.UserByNick(ctx, strings.TrimSpace(nick))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return store.User{}, err
 	}

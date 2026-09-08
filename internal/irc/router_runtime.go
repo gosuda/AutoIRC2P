@@ -98,9 +98,17 @@ func (m *Manager) runRouter() {
 			return nil
 		}
 		m.mu.Lock()
+		var warmups []*warmDestination
+		if m.routerReady {
+			m.ready = make(chan struct{})
+			warmups = m.cancelWarmDestinationsLocked()
+		}
 		m.routerReady = false
 		m.router = nil
 		m.mu.Unlock()
+		for _, warm := range warmups {
+			<-warm.done
+		}
 		cleanupErr := errors.Join(runtime.closeResources(), runtime.addressBook.Wait())
 		if nodeDone != nil {
 			<-nodeDone

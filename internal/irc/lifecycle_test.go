@@ -308,7 +308,7 @@ func TestAccountGraceClosesStreamAndCancelsPendingJoins(t *testing.T) {
 			created <- endpoint
 			return endpoint, nil
 		})
-		manager.cfg.AccountIdleGrace = time.Second
+		manager.cfg.AccountIdleGrace = 50 * time.Millisecond
 		release, err := manager.Acquire(t.Context(), account)
 		if err != nil {
 			t.Fatal(err)

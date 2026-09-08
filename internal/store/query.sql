@@ -1,9 +1,11 @@
 -- name: CreateUser :one
 INSERT INTO users (email,nick,password_salt,password_hash,irc_password,identity_keys,identity_address,created_at) VALUES (?,?,?,?,?,?,?,?) RETURNING *;
--- name: UserByEmail :one
-SELECT * FROM users WHERE email = ?;
+-- name: UserByNick :one
+SELECT * FROM users WHERE nick = ?;
 -- name: UserByID :one
 SELECT * FROM users WHERE id = ?;
+-- name: UsersForPrewarm :many
+SELECT users.* FROM users LEFT JOIN sessions ON sessions.user_id = users.id GROUP BY users.id ORDER BY MAX(sessions.expires_at) DESC, users.id DESC LIMIT 2;
 -- name: RegisterIRC :exec
 UPDATE users SET irc_registered = 1 WHERE id = ?;
 -- name: UserIdentityPool :one

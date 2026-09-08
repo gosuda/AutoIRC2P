@@ -44,12 +44,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	status := s.net
-	if user != nil {
-		if accountStatus, ok := s.accountStates[user.ID]; ok {
-			status = accountStatus
-		}
-	}
+	status := s.networkStatusLocked(userID)
 	s.mu.Unlock()
 	lang := "ko"
 	if strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "en") {
@@ -58,16 +53,20 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"user": user, "rooms": rooms, "network": status, "displayLanguage": lang, "translationEnabled": s.translator != nil})
 }
 func (s *Server) salt(w http.ResponseWriter, r *http.Request) {
-	email := r.URL.Query().Get("email")
-	if len(email) > 254 {
-		writeError(w, 400, "invalid email")
+	nick := strings.TrimSpace(r.URL.Query().Get("nick"))
+	if len(nick) > 24 {
+		writeError(w, 400, "invalid nickname")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"salt": s.auth.Salt(email), "iterations": auth.Iterations, "algorithm": "PBKDF2-SHA256"})
+	salt, err := s.auth.Salt(r.Context(), nick)
+	if err != nil {
+		writeError(w, 503, "salt unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"salt": salt, "iterations": auth.Iterations, "algorithm": "PBKDF2-SHA256"})
 }
 
 type credentials struct {
-	Email        string `json:"email"`
 	Nick         string `json:"nick"`
 	PasswordHash string `json:"passwordHash"`
 }
@@ -78,7 +77,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	user, err := s.auth.Register(r.Context(), body.Email, body.Nick, body.PasswordHash)
+	user, err := s.auth.Register(r.Context(), body.Nick, body.PasswordHash)
 	if err != nil {
 		if errors.Is(err, auth.ErrInput) || errors.Is(err, auth.ErrRegistration) {
 			writeError(w, 400, err.Error())
@@ -95,7 +94,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	user, err := s.auth.Login(r.Context(), body.Email, body.PasswordHash)
+	user, err := s.auth.Login(r.Context(), body.Nick, body.PasswordHash)
 	if err != nil {
 		if errors.Is(err, auth.ErrCredentials) {
 			writeError(w, 401, "invalid credentials")

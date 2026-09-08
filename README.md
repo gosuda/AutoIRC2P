@@ -80,9 +80,11 @@ Open `https://chat.example.org` in domain mode, or a ready HTTPS URL printed in 
 
 The first I2P connection can take several minutes. **Live feed** means your browser is connected; **I2P network** shows whether IRC is connected. Guests can read; create an account to send messages.
 
-**Preparing to send** means the browser/history or IRC channel membership is not ready, not that translation is pending. Both your account and the shared reader must join the channel before sending; check **Connection details** for IRC failures. Disabling translation does not bypass these delivery checks.
+Sign up and sign in with a nickname and password; no email input is required. New accounts receive an internal, generated `@gmail.com` identifier, not a real mailbox. The app creates no Gmail account and sends no email. Existing accounts keep their credentials and I2P identities and now sign in with their existing nickname.
 
-Rooms appear in a vertically scrollable list from startup, ordered by the latest message. New activity reorders the list without switching your open conversation.
+**Connected** is IRC connection status, not channel membership. It can appear before the current channel's JOIN is acknowledged. **Preparing to send** also covers browser/history startup; both your account and the shared reader must join the channel before sending. JOIN requests are paced 100ms apart. Check **Connection details** for IRC failures. Disabling translation does not bypass these delivery checks.
+
+The most recently active room opens by default, ahead of saved favorites; empty rooms fall back to configured order. New activity reorders the list without switching your open conversation. On mobile, swipe left across the conversation or tap the room-menu button to open the left drawer; swiping right from the left edge also opens it. Selecting a room, tapping the backdrop, or pressing Escape closes the drawer. Desktop keeps the persistent sidebar.
 
 `TRANSLATION_ENABLED=0` removes translation controls and background translation work. History, live messages, and outgoing messages remain original-only even if a browser saved Auto-translate as On. Provider settings are ignored; interface language selection remains available. Restart the app and reload open browser tabs after changing this setting. The default is `1`.
 
@@ -104,6 +106,8 @@ The shared router and IRC reader stay active without browser users and retry sta
 Without `IRC_OBSERVER_NICK` and `IRC_OBSERVER_PASSWORD`, the shared reader uses a random `Irc2PGuest00000`–`Irc2PGuest99999` nickname on every IRC connection, excluding its previous nickname. Nickname conflicts trigger the same one-second reconnect with a new nickname. Explicit observer NickServ credentials and individual account nicknames remain fixed.
 
 Each account and the shared reader maintain **three I2P destinations**, isolated from other accounts. Failed attempts and disconnected sessions select the next destination in round-robin order; only one IRC connection is active per account. The original identity remains the first entry, and two additional identities are encrypted in the database and reused across restarts. Healthy destinations keep their tunnels and route caches; initial readiness is not repeated during LeaseSet renewal. Browser reconnects reuse leased account sessions within `IRC_ACCOUNT_IDLE_GRACE` (default two minutes).
+
+At startup, up to two existing accounts have their primary destinations prewarmed, prioritizing recent stored sessions and then newest accounts. Warmup builds tunnels and waits for LeaseSet readiness without opening IRC connections. Login reuses only that account's matching primary destination; new or other accounts use normal startup. Failed, cancelled, or router-invalidated warmups are discarded. Unused warmups yield capacity to active accounts.
 
 Missing or expired local tunnel routes recreate only the affected pool entry, using the same saved keys. A channel-level `437` response marks only that room unavailable. A failed browser session refresh leaves the existing feed connected; WebSocket retry backoff resets only after identity verification and the room snapshot. Account network status is not overwritten by shared-reader status.
 
@@ -141,7 +145,7 @@ Existing explicit hop settings are preserved. One hop offers less anonymity marg
 
 Configured tunnel pool capacities are preserved. IVNP removes replaced tunnels from selection but retains their execution state until the original advertised expiration, so renewal does not interrupt peers still using cached leases.
 
-The default `IRC_MAX_ACCOUNTS=16` requires capacity for 52 destinations, including the reader pool and IVNP's default destination. If `[state] max_destinations` is omitted, embedded capacity grows with the account limit, up to 256 destinations (84 accounts). Explicit destination limits are preserved. For example, `IRC_MAX_ACCOUNTS=62` requires 190 destinations; pools are created only for active accounts.
+The default `IRC_MAX_ACCOUNTS=16` automatically reserves capacity for 54 destinations: 52 for account/reader pools and IVNP's default destination, plus two warmups. If `[state] max_destinations` is omitted, embedded capacity grows with the account limit, capped at 256 destinations; 84 active accounts remain supported by evicting unused warmups when needed. Explicit destination limits are preserved. For example, `IRC_MAX_ACCOUNTS=62` automatically reserves 192 destinations.
 
 ## Updates and data
 

@@ -10,7 +10,6 @@
     onauthenticated: (user: User) => void;
   } = $props();
   let dialog: HTMLDialogElement;
-  let email = $state('');
   let password = $state('');
   let nick = $state('');
   let busy = $state(false);
@@ -40,10 +39,9 @@
     error = '';
     controller = new AbortController();
     const signal = controller.signal;
-    const normalizedEmail = email.trim().toLowerCase();
     const operation = mode;
     const nickname = nick.trim();
-    const derivation = passwordHash(normalizedEmail, password, signal);
+    const derivation = passwordHash(nickname, password, signal);
     password = '';
     let hash = '';
     try {
@@ -51,7 +49,7 @@
       signal.throwIfAborted();
       const result = await request<{ user: User }>(`/api/auth/${operation}`, {
         method: 'POST', signal,
-        body: JSON.stringify({ email: normalizedEmail, passwordHash: hash, ...(operation === 'register' ? { nick: nickname } : {}) })
+        body: JSON.stringify({ nick: nickname, passwordHash: hash })
       });
       if (!signal.aborted) onauthenticated(result.user);
     } catch (cause) {
@@ -76,13 +74,9 @@
   <h2 id="auth-title">{mode === 'register' ? text.registerTitle : text.loginTitle}</h2>
   <p id="auth-description" class="muted">{mode === 'register' ? text.registerDescription : text.loginDescription}</p>
   <form onsubmit={authenticate} aria-busy={busy}>
-    <label for="auth-email">{text.email}</label>
-    <input id="auth-email" type="email" name="email" autocomplete="username" bind:value={email} required maxlength="254" aria-describedby="email-note" />
-    <p class="field-note" id="email-note">{text.privateEmail}</p>
-    {#if mode === 'register'}
-      <label for="auth-nick">{text.nick}</label>
-      <input id="auth-nick" name="nick" autocomplete="nickname" bind:value={nick} required minlength="3" maxlength="24" pattern={'[A-Za-z][A-Za-z0-9_\\-]{2,23}'} />
-    {/if}
+    <label for="auth-nick">{text.nick}</label>
+    <input id="auth-nick" name="nick" autocomplete="username" autocapitalize="none" spellcheck="false" bind:value={nick} required minlength="3" maxlength="24" pattern={'[A-Za-z][A-Za-z0-9_\\-]{2,23}'} aria-describedby="nick-note" />
+    <p class="field-note" id="nick-note">{text.nickNote}</p>
     <label for="auth-password">{text.password}</label>
     <input id="auth-password" type="password" name="password" autocomplete={mode === 'register' ? 'new-password' : 'current-password'} bind:value={password} required minlength={mode === 'register' ? 12 : 1} maxlength="1024" aria-describedby={error ? 'auth-error' : 'password-note'} aria-invalid={!!error} />
     <p id="password-note" class="field-note">{text.passwordNote}</p>

@@ -1,5 +1,5 @@
 export type Language = 'en' | 'ko';
-export type User = { id: number; email: string; nick: string };
+export type User = { id: number; nick: string };
 export type Room = {
   name: string;
   language: string;
@@ -83,10 +83,10 @@ export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export async function passwordHash(email: string, password: string, signal: AbortSignal): Promise<string> {
+export async function passwordHash(nick: string, password: string, signal: AbortSignal): Promise<string> {
   if (!globalThis.crypto?.subtle) throw new Error('A secure HTTPS connection or localhost is required to sign in.');
   const parameters = await request<{ salt: string; iterations: number; algorithm: string }>(
-    `/api/auth/salt?email=${encodeURIComponent(email)}`, { signal }
+    `/api/auth/salt?nick=${encodeURIComponent(nick)}`, { signal }
   );
   if (parameters.algorithm !== 'PBKDF2-SHA256' || parameters.iterations !== 600000 ||
       !/^(?:[a-f\d]{2})+$/i.test(parameters.salt)) {

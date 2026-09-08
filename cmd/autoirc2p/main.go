@@ -111,6 +111,7 @@ func run() (err error) {
 		if err = bridge.Start(ctx); err != nil {
 			return err
 		}
+		prewarmAccounts(ctx, queries, accounts, bridge)
 		observer, err := accounts.Observer(ctx)
 		if err != nil {
 			return err
@@ -136,4 +137,23 @@ func run() (err error) {
 		err = nil
 	}
 	return err
+}
+
+func prewarmAccounts(ctx context.Context, queries *store.Queries, accounts *auth.Service, bridge *irc.Manager) {
+	users, err := queries.UsersForPrewarm(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("Unable to select accounts for I2P destination warmup")
+		return
+	}
+	for _, user := range users {
+		account, err := accounts.Account(ctx, user)
+		if err == nil {
+			err = bridge.Prewarm(ctx, account)
+		}
+		account.ReleaseSensitive()
+		if err != nil {
+			event := log.Warn().Int64("account_id", user.ID)
+			event.Err(err).Msg("Unable to queue I2P destination warmup")
+		}
+	}
 }

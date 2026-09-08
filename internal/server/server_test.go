@@ -54,7 +54,7 @@ func TestHTTPOnlyExplicitAuthenticatedSendReachesIRC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user, err := a.Register(ctx, "human@example.org", "humanNick", strings.Repeat("ab", 32))
+	user, err := a.Register(ctx, "humanNick", strings.Repeat("ab", 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,5 +267,73 @@ func TestReaderLanguageControlsHistoryAndLiveTranslation(t *testing.T) {
 				t.Fatalf("original-only reader invoked translator %d times", calls.Load())
 			}
 		})
+	}
+}
+
+func TestNicknameAuthenticationDoesNotDiscloseInternalEmail(t *testing.T) {
+	app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
+	proof := strings.Repeat("cd", 32)
+	handler := app.Handler()
+	var cookie *http.Cookie
+	for _, step := range []struct {
+		method, path, body string
+	}{
+		{http.MethodPost, "/api/auth/register", `{"nick":"newAccount","passwordHash":"` + proof + `"}`},
+		{http.MethodPost, "/api/auth/login", `{"nick":" NEWACCOUNT ","passwordHash":"` + proof + `"}`},
+		{http.MethodGet, "/api/session", ""},
+	} {
+		req := httptest.NewRequest(step.method, "https://chat.example"+step.path, strings.NewReader(step.body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://chat.example")
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d: %s", step.path, response.Code, response.Body.String())
+		}
+		stored, err := app.q.UserByNick(t.Context(), "newAccount")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			User map[string]any `json:"user"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.User) != 2 || body.User["id"] != float64(stored.ID) || body.User["nick"] != "newAccount" {
+			t.Fatalf("%s exposed unexpected public user fields: %v", step.path, body.User)
+		}
+		if strings.Contains(response.Body.String(), stored.Email) {
+			t.Fatalf("%s disclosed the internal email", step.path)
+		}
+		if step.method == http.MethodPost {
+			cookies := (&http.Response{Header: response.Header()}).Cookies()
+			cookie = nil
+			for _, candidate := range cookies {
+				if candidate.Name == "session" {
+					cookie = candidate
+				}
+			}
+			if cookie == nil {
+				t.Fatalf("%s did not create a session", step.path)
+			}
+		}
+	}
+}
+
+func TestAuthenticationRejectsEmailCredentials(t *testing.T) {
+	app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
+	for _, path := range []string{"/api/auth/register", "/api/auth/login"} {
+		req := httptest.NewRequest(http.MethodPost, "https://chat.example"+path, strings.NewReader(`{"email":"person@example.org","nick":"anotherNick","passwordHash":"`+strings.Repeat("ab", 32)+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://chat.example")
+		response := httptest.NewRecorder()
+		app.Handler().ServeHTTP(response, req)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s accepted email credentials: status=%d", path, response.Code)
+		}
 	}
 }

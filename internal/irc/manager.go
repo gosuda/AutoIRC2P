@@ -66,29 +66,33 @@ type Config struct {
 
 // Manager callbacks run on connection workers and must not call Close or block.
 type Manager struct {
-	cfg               Config
-	router            *routerRuntime
-	newRouter         func() (*routerRuntime, error)
-	routerReady       bool
-	createDestination func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error)
-	onEvent           func(Event)
-	rooms             map[string]string
-	mu                sync.Mutex
-	ctx               context.Context
-	cancel            context.CancelFunc
-	started           bool
-	closed            bool
-	ready             chan struct{}
-	accounts          map[int64]*accountConnection
-	wg                sync.WaitGroup
-	accountWG         sync.WaitGroup
-	closeOnce         sync.Once
-	closeErr          error
+	cfg                 Config
+	router              *routerRuntime
+	newRouter           func() (*routerRuntime, error)
+	routerReady         bool
+	createDestination   func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error)
+	destinationCapacity int
+	onEvent             func(Event)
+	rooms               map[string]string
+	mu                  sync.Mutex
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	started             bool
+	closed              bool
+	ready               chan struct{}
+	accounts            map[int64]*accountConnection
+	warm                map[warmDestinationKey]*warmDestination
+	warmWG              sync.WaitGroup
+	wg                  sync.WaitGroup
+	accountWG           sync.WaitGroup
+	closeOnce           sync.Once
+	closeErr            error
 }
 
 type accountConnection struct {
 	account      Account
 	destinations []destinationSlot
+	warm         *warmDestination
 	ctx          context.Context
 	cancel       context.CancelFunc
 	done         chan struct{}
@@ -146,12 +150,12 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 		}
 		rooms[fold(room)] = room
 	}
-	destinationCapacity := (cfg.MaxAccounts+1)*DestinationPoolSize + 1
+	destinationCapacity := min((cfg.MaxAccounts+1)*DestinationPoolSize+1+prewarmCapacity, maxRouterDestinations)
 	configuration, err := loadRouterConfig(cfg.ConfigPath, destinationCapacity)
 	if err != nil {
 		return nil, fmt.Errorf("load IVNP configuration: %w", err)
 	}
-	// Reserve the observer pool and IVNP's default destination as well.
+	// Unclaimed warmups yield capacity to active account pools.
 	maxAccounts := (configuration.State.MaxDestinations-1)/DestinationPoolSize - 1
 	if cfg.MaxAccounts > maxAccounts {
 		return nil, fmt.Errorf("IRC MaxAccounts=%d with %d destinations per account and observer exceeds IVNP state.max_destinations=%d (maximum IRC MaxAccounts=%d): %w", cfg.MaxAccounts, DestinationPoolSize, configuration.State.MaxDestinations, max(0, maxAccounts), errInvalidConfig)
@@ -163,6 +167,7 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	}
 	cfg.Rooms = append([]string(nil), cfg.Rooms...)
 	manager := &Manager{cfg: cfg, router: router, newRouter: openRouter, onEvent: onEvent, rooms: rooms, ready: make(chan struct{}), accounts: make(map[int64]*accountConnection)}
+	manager.destinationCapacity = configuration.State.MaxDestinations
 	manager.createDestination = manager.createRouterDestination
 	return manager, nil
 }
@@ -261,13 +266,33 @@ func (m *Manager) acquire(ctx context.Context, account Account) (func(), error) 
 				return nil, errInvalidAccount
 			}
 		}
-		destinations, err := restoreDestinations(account)
+		warm, wait, err := m.matchWarmDestinationLocked(account)
+		if err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		if wait != nil {
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-m.ctx.Done():
+				return nil, m.ctx.Err()
+			case <-wait:
+				continue
+			}
+		}
+		first := 0
+		if warm != nil {
+			first = 1
+		}
+		destinations, err := restoreDestinations(account, first)
 		if err != nil {
 			m.mu.Unlock()
 			return nil, err
 		}
 		if err := m.admissionErrorLocked(ctx); err != nil {
-			for i := range destinations {
+			for i := first; i < len(destinations); i++ {
 				destinations[i].local.ReleaseSensitive()
 			}
 			m.mu.Unlock()
@@ -282,6 +307,9 @@ func (m *Manager) acquire(ctx context.Context, account Account) (func(), error) 
 		account.Email = ""
 		lifetime, cancel := context.WithCancel(m.ctx)
 		state := &accountConnection{account: account, destinations: destinations, ctx: lifetime, cancel: cancel, done: make(chan struct{}), joined: make(map[string]bool), unavailable: make(map[string]bool)}
+		if warm != nil {
+			m.claimWarmDestinationLocked(state, warm)
+		}
 		m.accounts[account.ID] = state
 		release := m.leaseLocked(state)
 		m.accountWG.Go(func() { m.runAccount(state) })
@@ -391,11 +419,22 @@ func (m *Manager) finishAccount(state *accountConnection) {
 
 func (m *Manager) runAccount(state *accountConnection) {
 	defer m.finishAccount(state)
+	if state.warm != nil {
+		m.status(state.account.ID, "connecting", "Waiting for prewarmed I2P destination")
+		stop := context.AfterFunc(state.ctx, state.warm.cancel)
+		<-state.warm.done
+		stop()
+		state.destinations[0] = state.warm.slot
+		state.warm = nil
+	}
+	m.mu.Lock()
+	ready := m.ready
+	m.mu.Unlock()
 	m.status(state.account.ID, "connecting", "Waiting for embedded I2P router")
 	select {
 	case <-state.ctx.Done():
 		return
-	case <-m.ready:
+	case <-ready:
 	}
 	// Creation starts tunnel maintenance for every slot, without opening IRC sockets.
 	for i := range state.destinations {
@@ -403,7 +442,9 @@ func (m *Manager) runAccount(state *accountConnection) {
 			return
 		}
 		slot := &state.destinations[i]
-		slot.creationErr = m.createAccountDestination(state, slot)
+		if slot.endpoint == nil {
+			slot.creationErr = m.createAccountDestination(state, slot)
+		}
 	}
 	selected := 0
 	for state.ctx.Err() == nil {
@@ -532,6 +573,7 @@ func (m *Manager) Close() error {
 		if started {
 			m.wg.Wait()
 			m.accountWG.Wait()
+			m.warmWG.Wait()
 		} else {
 			m.closeErr = m.router.close()
 		}

@@ -77,13 +77,10 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	sub.cursorMu.Lock()
 	s.mu.Lock()
 	s.subscribers[sub] = struct{}{}
-	status := s.net
-	if accountStatus, ok := s.accountStates[sub.userID]; ok {
-		status = accountStatus
-	}
+	status := s.networkStatusLocked(sub.userID)
+	sub.push(frame{Type: "status", State: status.State, Detail: status.Detail})
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.subscribers, sub); s.mu.Unlock(); sub.close() }()
-	sub.push(frame{Type: "status", State: status.State, Detail: status.Detail})
 	rooms, roomErr := s.allRooms(ctx, sub.userID, sub.cursors)
 	if roomErr == nil {
 		sub.push(frame{Type: "rooms", Rooms: rooms})

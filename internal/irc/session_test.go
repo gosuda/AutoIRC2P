@@ -215,14 +215,14 @@ func TestJoinPacingKeepsPongResponsiveAndCancelsPendingRooms(t *testing.T) {
 		if got := readLine(); got != "PONG :keepalive\r\n" {
 			t.Fatalf("response during join pacing = %q", got)
 		}
-		if elapsed := time.Since(first); elapsed >= 2*time.Second {
+		if elapsed := time.Since(first); elapsed >= 100*time.Millisecond {
 			t.Fatalf("PONG blocked behind join timer: %s", elapsed)
 		}
 		if got := readLine(); got != "JOIN #second\r\n" {
 			t.Fatalf("second join = %q", got)
 		}
-		if elapsed := time.Since(first); elapsed < 2*time.Second {
-			t.Fatalf("JOIN burst after %s", elapsed)
+		if elapsed := time.Since(first); elapsed != 100*time.Millisecond {
+			t.Fatalf("JOIN delay = %s, want 100ms", elapsed)
 		}
 		cancel()
 		remaining, err := io.ReadAll(reader)

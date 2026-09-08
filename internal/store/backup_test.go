@@ -54,7 +54,7 @@ func newRecoveryFixture(t *testing.T) recoveryFixture {
 		t.Fatal(err)
 	}
 	proof := strings.Repeat("ab", 32)
-	user, err := service.Register(t.Context(), "alice@example.org", "alice", proof)
+	user, err := service.Register(t.Context(), "alice", proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,10 +147,18 @@ func TestLiveWALBackupRestoresAuthenticationAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered.Salt(f.user.Email) != f.service.Salt(f.user.Email) {
+	originalSalt, err := f.service.Salt(t.Context(), f.user.Nick)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredSalt, err := recovered.Salt(t.Context(), f.user.Nick)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredSalt != originalSalt {
 		t.Fatal("browser salt changed across recovery")
 	}
-	login, err := recovered.Login(t.Context(), f.user.Email, f.proof)
+	login, err := recovered.Login(t.Context(), f.user.Nick, f.proof)
 	if err != nil || login.ID != f.user.ID {
 		t.Fatalf("restored login: user=%d err=%v", login.ID, err)
 	}
@@ -275,7 +283,7 @@ INSERT INTO send_requests VALUES(1,'confirmed-request','sent',7,'#one','alice','
 			if err != nil {
 				t.Fatal(err)
 			}
-			login, err := recovered.Login(t.Context(), f.user.Email, f.proof)
+			login, err := recovered.Login(t.Context(), f.user.Nick, f.proof)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -15,12 +15,12 @@ type destinationSlot struct {
 	creationErr error
 }
 
-func restoreDestinations(account Account) ([]destinationSlot, error) {
+func restoreDestinations(account Account, first int) ([]destinationSlot, error) {
 	slots := make([]destinationSlot, len(account.Alternates)+1)
-	for i := range slots {
+	for i := first; i < len(slots); i++ {
 		local, err := restoreIdentity(account.identityAt(i))
 		if err != nil {
-			for j := range i {
+			for j := first; j < i; j++ {
 				slots[j].local.ReleaseSensitive()
 			}
 			return nil, fmt.Errorf("restore I2P destination slot %d: %w", i, err)

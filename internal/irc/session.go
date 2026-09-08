@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	channelJoinInterval = 2 * time.Second
+	channelJoinInterval = 100 * time.Millisecond
 	keepaliveInterval   = 30 * time.Second
 )
 

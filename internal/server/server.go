@@ -186,8 +186,8 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		} else {
 			s.accountStates[event.AccountID] = status
 		}
+		s.broadcastLocked("", "", event.AccountID, frame{Type: "status"})
 		s.mu.Unlock()
-		s.broadcast("", "", event.AccountID, frame{Type: "status", State: status.State, Detail: status.Detail})
 		s.refreshRooms(ctx, "", event.AccountID)
 		return
 	case "membership":
@@ -320,6 +320,16 @@ func (s *Server) translateWorker(ctx context.Context) {
 		}
 	}
 }
+func (s *Server) networkStatusLocked(userID int64) network {
+	if userID == 0 {
+		return s.net
+	}
+	if status, ok := s.accountStates[userID]; ok {
+		return status
+	}
+	return network{State: "stopped", Detail: "IRC account connection stopped"}
+}
+
 func (s *Server) broadcast(room, lang string, userID int64, f frame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -334,10 +344,9 @@ func (s *Server) broadcastLocked(room, lang string, userID int64, f frame) {
 			continue
 		}
 		outgoing := f
-		if f.Type == "status" && userID == 0 {
-			if status, ok := s.accountStates[sub.userID]; ok {
-				outgoing.State, outgoing.Detail = status.State, status.Detail
-			}
+		if f.Type == "status" {
+			status := s.networkStatusLocked(sub.userID)
+			outgoing.State, outgoing.Detail = status.State, status.Detail
 		}
 		if f.Message != nil {
 			msg := personalize(*f.Message, sub.userID)

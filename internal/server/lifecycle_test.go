@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/gosuda/AutoIRC2P/internal/auth"
 	"github.com/gosuda/AutoIRC2P/internal/irc"
 	"github.com/gosuda/AutoIRC2P/internal/store"
@@ -46,7 +47,7 @@ func lifecycleServer(t *testing.T, b Bridge) (*Server, store.User, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user, err := a.Register(t.Context(), "alice@example.org", "alice", strings.Repeat("ab", 32))
+	user, err := a.Register(t.Context(), "alice", strings.Repeat("ab", 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,26 +282,119 @@ func TestReadCursorCountsMessagesAndNeverMovesBackward(t *testing.T) {
 	}
 }
 
-func TestObserverDisconnectDoesNotReplaceAccountNetworkStatus(t *testing.T) {
-	app, user, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
-	guest := &subscription{room: "#one", out: make(chan frame, 32), done: make(chan struct{}), cursors: map[string]int64{}}
-	account := &subscription{userID: user.ID, room: "#one", out: make(chan frame, 32), done: make(chan struct{}), cursors: map[string]int64{}}
-	app.subscribers[guest] = struct{}{}
-	app.subscribers[account] = struct{}{}
-	app.receive(t.Context(), irc.Event{Kind: "status", AccountID: user.ID, State: "connected"})
-	app.receive(t.Context(), irc.Event{Kind: "status", State: "disconnected"})
-	for _, tc := range []struct {
-		sub  *subscription
-		want string
-	}{{guest, "disconnected"}, {account, "connected"}} {
-		var state string
-		for len(tc.sub.out) > 0 {
-			if message := <-tc.sub.out; message.Type == "status" {
-				state = message.State
+func TestAccountNetworkStatusStaysIndependentAcrossReconnects(t *testing.T) {
+	app, user, token := lifecycleServer(t, &lifecycleBridge{state: irc.RoomPreparing})
+	app.receive(t.Context(), irc.Event{Kind: "status", State: "connected", Text: "observer connection"})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); app.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	server := httptest.NewServer(app.Handler())
+	t.Cleanup(server.Close)
+
+	snapshot := func(authenticated bool, want string) network {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+		if authenticated {
+			req.AddCookie(&http.Cookie{Name: "session", Value: token})
+		}
+		response := httptest.NewRecorder()
+		app.Handler().ServeHTTP(response, req)
+		if response.Code != http.StatusOK {
+			t.Fatalf("session status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var session struct {
+			Network network
+			Rooms   []Room
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil {
+			t.Fatal(err)
+		}
+		if session.Network.State != want {
+			t.Errorf("authenticated=%v session network = %+v, want %q", authenticated, session.Network, want)
+		}
+		for _, room := range session.Rooms {
+			wantSend := "login_required"
+			if authenticated {
+				wantSend = "preparing"
+			}
+			if room.SendState != wantSend {
+				t.Errorf("authenticated=%v room %q send state = %q, want %q before JOIN", authenticated, room.Name, room.SendState, wantSend)
 			}
 		}
-		if state != tc.want {
-			t.Fatalf("account %d network status = %q, want %q", tc.sub.userID, state, tc.want)
+		return session.Network
+	}
+	readStatus := func(conn *websocket.Conn, want network) {
+		t.Helper()
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			var f frame
+			if err := conn.ReadJSON(&f); err != nil {
+				t.Fatal(err)
+			}
+			if f.Type != "status" {
+				continue
+			}
+			if f.State != want.State || f.Detail != want.Detail {
+				t.Errorf("websocket status = %q (%q), session = %+v", f.State, f.Detail, want)
+			}
+			return
+		}
+	}
+	connect := func(authenticated bool, want string) *websocket.Conn {
+		t.Helper()
+		header := http.Header{"Origin": {"https://chat.example"}}
+		if authenticated {
+			header.Set("Cookie", "session="+token)
+		}
+		conn, response, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/ws?room=%23one", header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := conn.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		if response.Body != nil {
+			if err := response.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		readStatus(conn, snapshot(authenticated, want))
+		return conn
+	}
+	account := connect(true, "stopped")
+	guest := connect(false, "connected")
+	for _, step := range []struct {
+		name                   string
+		accountID              int64
+		state, personal, guest string
+	}{
+		{"observer update before personal startup", 0, "connected", "stopped", "connected"},
+		{"personal startup", user.ID, "connecting", "connecting", "connected"},
+		{"observer disconnect during startup", 0, "disconnected", "connecting", "disconnected"},
+		{"personal connected before JOIN", user.ID, "connected", "connected", "disconnected"},
+		{"observer recovery", 0, "connected", "connected", "connected"},
+		{"personal disconnect", user.ID, "disconnected", "disconnected", "connected"},
+		{"observer update during personal disconnect", 0, "connected", "disconnected", "connected"},
+		{"personal stop", user.ID, "stopped", "stopped", "connected"},
+		{"observer update after personal stop", 0, "connected", "stopped", "connected"},
+		{"personal reconnect", user.ID, "connecting", "connecting", "connected"},
+		{"personal connection restored", user.ID, "connected", "connected", "connected"},
+		{"observer disconnect after personal recovery", 0, "disconnected", "connected", "disconnected"},
+	} {
+		t.Log(step.name)
+		app.receive(ctx, irc.Event{Kind: "status", AccountID: step.accountID, State: step.state, Text: step.name})
+		readStatus(account, snapshot(true, step.personal))
+		guestStatus := snapshot(false, step.guest)
+		if step.accountID == 0 {
+			readStatus(guest, guestStatus)
+		}
+		if step.accountID == user.ID && step.state == "stopped" {
+			connect(true, "stopped")
 		}
 	}
 }

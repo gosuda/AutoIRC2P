@@ -129,7 +129,7 @@ func TestLoadRouterConfigSizesAccountPoolsWithoutOverridingOperatorLimits(t *tes
 		text string
 		want int
 	}{
-		{"automatic capacity", "[tunnel]\nhops = 1\n", 190},
+		{"automatic capacity", "[tunnel]\nhops = 1\n", 192},
 		{"explicit smaller limit", "[state]\nmax_destinations = 64\n", 64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,7 +137,7 @@ func TestLoadRouterConfigSizesAccountPoolsWithoutOverridingOperatorLimits(t *tes
 			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
 				t.Fatal(err)
 			}
-			configuration, err := loadRouterConfig(path, (62+1)*DestinationPoolSize+1)
+			configuration, err := loadRouterConfig(path, (62+1)*DestinationPoolSize+1+prewarmCapacity)
 			if err != nil {
 				t.Fatal(err)
 			}

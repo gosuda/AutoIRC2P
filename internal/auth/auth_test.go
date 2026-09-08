@@ -3,11 +3,13 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/pbkdf2"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/gosuda/AutoIRC2P/internal/irc"
@@ -29,20 +31,37 @@ func TestRegistrationKeepsSaltStableAndSecretsPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	missingSalt := service.Salt(" Person@example.org ")
-	proofBytes := sha256.Sum256([]byte("browser stretched proof"))
-	proof := hex.EncodeToString(proofBytes[:])
-	user, err := service.Register(ctx, "person@example.org", "ordinaryNick", proof)
+	missingSalt, err := service.Salt(ctx, " ORDINARYNICK ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := service.Salt("person@example.org"); got != missingSalt {
-		t.Fatalf("registration changed public salt: %s != %s", got, missingSalt)
+	proof := browserProof(t, missingSalt, "my account password")
+	proofBytes, err := hex.DecodeString(proof)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(service.Salt("missing@example.org")) != len(missingSalt) {
+	user, err := service.Register(ctx, " ordinaryNick ", proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registeredSalt, err := service.Salt(ctx, "ordinaryNick")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registeredSalt != missingSalt {
+		t.Fatalf("registration changed public salt: %s != %s", registeredSalt, missingSalt)
+	}
+	absentSalt, err := service.Salt(ctx, "missingNick")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(absentSalt) != len(missingSalt) {
 		t.Fatal("missing account salt shape reveals existence")
 	}
-	if bytes.Equal(user.PasswordHash, proofBytes[:]) {
+	if !regexp.MustCompile(`^[0-9a-f]{30}@gmail\.com$`).MatchString(user.Email) {
+		t.Fatalf("internal address is not a synthetic Gmail identifier: %q", user.Email)
+	}
+	if bytes.Equal(user.PasswordHash, proofBytes) {
 		t.Fatal("stored browser credential without server hashing")
 	}
 	account, err := service.Account(ctx, user)
@@ -56,13 +75,17 @@ func TestRegistrationKeepsSaltStableAndSecretsPrivate(t *testing.T) {
 	if account.Email == user.Email {
 		t.Fatal("application email exposed to IRC")
 	}
-	if _, err := service.Login(ctx, "PERSON@example.org", proof); err != nil {
+	loggedIn, err := service.Login(ctx, " ORDINARYNICK ", browserProof(t, registeredSalt, "my account password"))
+	if err != nil {
 		t.Fatal(err)
 	}
+	if loggedIn.ID != user.ID || loggedIn.Nick != "ordinaryNick" {
+		t.Fatalf("nickname login returned id=%d nick=%q", loggedIn.ID, loggedIn.Nick)
+	}
 	bad := hex.EncodeToString(bytes.Repeat([]byte{9}, 32))
-	for _, email := range []string{"person@example.org", "missing@example.org"} {
-		if _, err := service.Login(ctx, email, bad); !errors.Is(err, ErrCredentials) {
-			t.Fatalf("login %s: %v", email, err)
+	for _, nick := range []string{"ordinaryNick", "missingNick"} {
+		if _, err := service.Login(ctx, nick, bad); !errors.Is(err, ErrCredentials) {
+			t.Fatalf("login %s: %v", nick, err)
 		}
 	}
 	token, err := service.CreateSession(ctx, user.ID)
@@ -78,6 +101,94 @@ func TestRegistrationKeepsSaltStableAndSecretsPrivate(t *testing.T) {
 	}
 	if _, err := service.Session(ctx, token); err == nil {
 		t.Fatal("logged-out session accepted")
+	}
+}
+
+func TestExistingEmailAccountUsesNicknameWithoutChangingSecrets(t *testing.T) {
+	ctx := t.Context()
+	db, q, err := store.NewSQLite(ctx, filepath.Join(t.TempDir(), "chat.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	service, err := New(q, bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These credentials were derived from the email before nickname authentication.
+	const email = "person@example.org"
+	const oldSalt = "425bd11fc097b834924af146e07d8668"
+	oldProof, err := hex.DecodeString("188d51cdd2eab0d8ce65d0a4ce8007a8a20fe762015fd33d5aa2fce65c1b0c54")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := irc.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(identity.Keys)
+	passwordSalt := bytes.Repeat([]byte{5}, 32)
+	legacy, err := q.CreateUser(ctx, store.CreateUserParams{
+		Email:           email,
+		Nick:            "legacyNick",
+		PasswordSalt:    passwordSalt,
+		PasswordHash:    PasswordDigest(passwordSalt, oldProof),
+		IrcPassword:     service.Seal([]byte("existing IRC password"), "irc-password:"+email),
+		IdentityKeys:    service.Seal(identity.Keys, "identity:"+email),
+		IdentityAddress: identity.Address,
+		CreatedAt:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := service.Account(ctx, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(original.ReleaseSensitive)
+	before, err := q.UserByID(ctx, legacy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	salt, err := service.Salt(ctx, " LEGACYNICK ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if salt != oldSalt {
+		t.Fatalf("existing browser salt changed: got %s, want %s", salt, oldSalt)
+	}
+	loggedIn, err := service.Login(ctx, " LEGACYNICK ", browserProof(t, salt, "unchanged account password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loggedIn.ID != legacy.ID || loggedIn.Nick != legacy.Nick {
+		t.Fatalf("existing nickname login returned id=%d nick=%q", loggedIn.ID, loggedIn.Nick)
+	}
+	account, err := service.Account(ctx, loggedIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(account.ReleaseSensitive)
+	assertSameDestinations(t, account, original)
+	if account.Password != "existing IRC password" {
+		t.Fatal("existing IRC password changed")
+	}
+	after, err := q.UserByID(ctx, legacy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Email != before.Email {
+		t.Fatal("nickname authentication changed the stored email")
+	}
+	if !bytes.Equal(after.PasswordSalt, before.PasswordSalt) || !bytes.Equal(after.PasswordHash, before.PasswordHash) || !bytes.Equal(after.IrcPassword, before.IrcPassword) {
+		t.Fatal("nickname authentication replaced existing stored credentials")
+	}
+	if !bytes.Equal(after.IdentityKeys, before.IdentityKeys) || !bytes.Equal(after.IdentityPool, before.IdentityPool) || after.IdentityAddress != before.IdentityAddress {
+		t.Fatal("nickname authentication replaced the existing identity")
 	}
 }
 
@@ -112,11 +223,11 @@ func TestIdentityPoolsConvergeAcrossConcurrentLoadsAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof := hex.EncodeToString(bytes.Repeat([]byte{1}, 32))
-	alice, err := first.Register(ctx, "alice@example.org", "alice", proof)
+	alice, err := first.Register(ctx, "alice", proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bob, err := first.Register(ctx, "bob@example.org", "bobby", proof)
+	bob, err := first.Register(ctx, "bobby", proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +331,7 @@ func TestInvalidStoredPoolsFailWithoutReplacingIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user, err := service.Register(ctx, "alice@example.org", "alice", hex.EncodeToString(bytes.Repeat([]byte{1}, 32)))
+	user, err := service.Register(ctx, "alice", hex.EncodeToString(bytes.Repeat([]byte{1}, 32)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,4 +393,17 @@ func assertSameDestinations(t *testing.T, got, want irc.Account) {
 			t.Errorf("alternate destination %d changed", i)
 		}
 	}
+}
+
+func browserProof(t *testing.T, salt, password string) string {
+	t.Helper()
+	decoded, err := hex.DecodeString(salt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := pbkdf2.Key(sha256.New, password, decoded, Iterations, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(proof)
 }
