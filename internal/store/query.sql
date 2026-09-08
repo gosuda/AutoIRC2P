@@ -6,6 +6,10 @@ SELECT * FROM users WHERE email = ?;
 SELECT * FROM users WHERE id = ?;
 -- name: RegisterIRC :exec
 UPDATE users SET irc_registered = 1 WHERE id = ?;
+-- name: UserIdentityPool :one
+SELECT identity_pool FROM users WHERE id = ?;
+-- name: InitializeUserIdentityPool :one
+UPDATE users SET identity_pool = CASE WHEN length(identity_pool) = 0 THEN sqlc.arg(identity_pool) ELSE identity_pool END WHERE id = sqlc.arg(id) RETURNING identity_pool;
 -- name: CreateSession :exec
 INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?);
 -- name: SessionUser :one
@@ -17,7 +21,9 @@ DELETE FROM sessions WHERE expires_at <= ?;
 -- name: GetObserver :one
 SELECT * FROM observer WHERE id = 1;
 -- name: CreateObserver :exec
-INSERT INTO observer (id,nick,identity_keys,identity_address) VALUES (1,?,?,?);
+INSERT INTO observer (id,nick,identity_keys,identity_address) VALUES (1,?,?,?) ON CONFLICT(id) DO NOTHING;
+-- name: InitializeObserverIdentityPool :one
+UPDATE observer SET identity_pool = CASE WHEN length(identity_pool) = 0 THEN sqlc.arg(identity_pool) ELSE identity_pool END WHERE id = 1 RETURNING identity_pool;
 -- name: AddMessage :one
 INSERT INTO messages (room,nick,original,service,created_at,sender_user_id,sender_request_id) VALUES (?,?,?,?,?,?,?) RETURNING *;
 -- name: Messages :many
@@ -58,3 +64,9 @@ DELETE FROM translations WHERE cache_key IN (SELECT t.cache_key FROM translation
 UPDATE send_requests SET payload_purged = 1, room = '', nick = '', original = '', wire_text = '' WHERE rowid IN (SELECT s.rowid FROM send_requests AS s WHERE s.payload_purged = 0 AND s.state IN ('confirmed','failed','unconfirmed') AND s.updated_at < ? AND s.created_at < ? ORDER BY s.updated_at LIMIT ?);
 -- name: BackupUserSecrets :many
 SELECT id,email,irc_password,identity_keys FROM users WHERE id > ? ORDER BY id LIMIT 100;
+-- name: BackupObserverSecrets :one
+SELECT identity_keys FROM observer WHERE id = 1;
+-- name: BackupUserIdentityPools :many
+SELECT id,email,identity_pool FROM users WHERE id > ? ORDER BY id LIMIT 100;
+-- name: BackupObserverIdentityPool :one
+SELECT identity_pool FROM observer WHERE id = 1;

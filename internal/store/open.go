@@ -24,7 +24,10 @@ var migration3 string
 //go:embed migration4.sql
 var migration4 string
 
-const schemaVersion = 4
+//go:embed migration5.sql
+var migration5 string
+
+const schemaVersion = 5
 
 func NewSQLite(ctx context.Context, path string) (*sql.DB, *Queries, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -61,11 +64,13 @@ func NewSQLite(ctx context.Context, path string) (*sql.DB, *Queries, error) {
 		migration := schema
 		switch version {
 		case 1:
-			migration = migration2 + "\n" + migration3 + "\n" + migration4
+			migration = migration2 + "\n" + migration3 + "\n" + migration4 + "\n" + migration5
 		case 2:
-			migration = migration3 + "\n" + migration4
+			migration = migration3 + "\n" + migration4 + "\n" + migration5
 		case 3:
-			migration = migration4
+			migration = migration4 + "\n" + migration5
+		case 4:
+			migration = migration5
 		}
 		if _, err = tx.ExecContext(ctx, migration+fmt.Sprintf("\nPRAGMA user_version=%d;", schemaVersion)); err != nil {
 			return fail(errors.Join(err, tx.Rollback()))

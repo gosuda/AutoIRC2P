@@ -43,3 +43,62 @@ func restoreIdentity(identity Identity) (*foundation.LocalDestination, error) {
 	}
 	return local, nil
 }
+
+// ReleaseSensitive clears the caller-owned credentials after manager admission.
+func (a *Account) ReleaseSensitive() {
+	clear(a.Identity.Keys)
+	a.Identity.Keys = nil
+	for i := range a.Alternates {
+		clear(a.Alternates[i].Keys)
+		a.Alternates[i].Keys = nil
+	}
+	a.Password = ""
+}
+
+func (a Account) identityAt(index int) Identity {
+	if index == 0 {
+		return a.Identity
+	}
+	return a.Alternates[index-1]
+}
+
+func validateIdentityPool(account Account) error {
+	if len(account.Alternates) >= DestinationPoolSize {
+		return errInvalidAccount
+	}
+	for i := range len(account.Alternates) + 1 {
+		address := account.identityAt(i).Address
+		if address == "" {
+			return errInvalidAccount
+		}
+		for j := range i {
+			if account.identityAt(j).Address == address {
+				return errInvalidAccount
+			}
+		}
+	}
+	return nil
+}
+
+func sameIdentityPool(first, second Account) bool {
+	if len(first.Alternates) != len(second.Alternates) {
+		return false
+	}
+	for i := range len(first.Alternates) + 1 {
+		if first.identityAt(i).Address != second.identityAt(i).Address {
+			return false
+		}
+	}
+	return true
+}
+
+func sharedIdentity(first, second Account) bool {
+	for i := range len(first.Alternates) + 1 {
+		for j := range len(second.Alternates) + 1 {
+			if first.identityAt(i).Address == second.identityAt(j).Address {
+				return true
+			}
+		}
+	}
+	return false
+}

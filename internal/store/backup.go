@@ -387,7 +387,7 @@ func validateSnapshot(ctx context.Context, path string, key []byte) (version int
 	if err = validateSchema(ctx, db, version); err != nil {
 		return 0, err
 	}
-	if err = validateKey(ctx, New(db), key); err != nil {
+	if err = validateKey(ctx, New(db), key, version); err != nil {
 		return 0, err
 	}
 	return version, nil
@@ -423,6 +423,10 @@ func validateSchema(ctx context.Context, db *sql.DB, version int) error {
 		columns["translations"] += ",created_at"
 		columns["send_requests"] += ",payload_purged"
 	}
+	if version >= 5 {
+		columns["users"] += ",identity_pool"
+		columns["observer"] += ",identity_pool"
+	}
 	for table, fields := range columns {
 		var kind string
 		if err := db.QueryRowContext(ctx, "SELECT type FROM sqlite_schema WHERE name = ?", table).Scan(&kind); err != nil {
@@ -442,7 +446,7 @@ func validateSchema(ctx context.Context, db *sql.DB, version int) error {
 	return nil
 }
 
-func validateKey(ctx context.Context, q *Queries, key []byte) error {
+func validateKey(ctx context.Context, q *Queries, key []byte, version int) error {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return err
@@ -465,6 +469,11 @@ func validateKey(ctx context.Context, q *Queries, key []byte) error {
 		if err != nil {
 			return err
 		}
+		if version >= 5 {
+			if err := validateUserIdentityPools(ctx, q, after, check); err != nil {
+				return err
+			}
+		}
 		for _, user := range users {
 			if err = check(user.IdentityKeys, "identity:"+user.Email); err != nil {
 				return err
@@ -478,12 +487,40 @@ func validateKey(ctx context.Context, q *Queries, key []byte) error {
 			break
 		}
 	}
-	observer, err := q.GetObserver(ctx)
+	observerKeys, err := q.BackupObserverSecrets(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	return check(observer.IdentityKeys, "observer")
+	if err := check(observerKeys, "observer"); err != nil {
+		return err
+	}
+	if version >= 5 {
+		pool, err := q.BackupObserverIdentityPool(ctx)
+		if err != nil {
+			return err
+		}
+		if len(pool) != 0 {
+			return check(pool, "observer-pool")
+		}
+	}
+	return nil
+}
+
+func validateUserIdentityPools(ctx context.Context, q *Queries, after int64, check func([]byte, string) error) error {
+	pools, err := q.BackupUserIdentityPools(ctx, after)
+	if err != nil {
+		return err
+	}
+	for _, pool := range pools {
+		if len(pool.IdentityPool) == 0 {
+			continue
+		}
+		if err := check(pool.IdentityPool, "identity-pool:"+pool.Email); err != nil {
+			return err
+		}
+	}
+	return nil
 }

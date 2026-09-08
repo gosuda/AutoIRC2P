@@ -1,0 +1,2 @@
+ALTER TABLE users ADD COLUMN identity_pool BLOB NOT NULL DEFAULT X'';
+ALTER TABLE observer ADD COLUMN identity_pool BLOB NOT NULL DEFAULT X'';

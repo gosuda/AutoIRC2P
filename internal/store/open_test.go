@@ -11,7 +11,7 @@ import (
 )
 
 func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
-	for _, version := range []int{1, 2, 3} {
+	for _, version := range []int{1, 2, 3, 4} {
 		t.Run(fmt.Sprintf("version%d", version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "legacy.sqlite")
 			legacy, err := sql.Open("sqlite", path)
@@ -42,7 +42,7 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 				}
 			}
 			lastID := int64(7)
-			if version == 3 {
+			if version >= 3 {
 				if _, err := legacy.Exec(migration3 + `
  INSERT INTO messages VALUES(100,'#one','alice','deleted','en','en',0,1000,0,'');
  DELETE FROM messages WHERE id=100;
@@ -51,6 +51,11 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 					t.Fatal(errors.Join(err, legacy.Close()))
 				}
 				lastID = 100
+			}
+			if version >= 4 {
+				if _, err := legacy.Exec(migration4 + "\nPRAGMA user_version=4;"); err != nil {
+					t.Fatal(errors.Join(err, legacy.Close()))
+				}
 			}
 			if err := validateSchema(t.Context(), legacy, version); err != nil {
 				t.Fatal(errors.Join(err, legacy.Close()))
@@ -71,8 +76,8 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			if err := db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&currentVersion); err != nil {
 				t.Fatal(err)
 			}
-			if currentVersion != 4 {
-				t.Fatalf("database version = %d, want 4", currentVersion)
+			if currentVersion != 5 {
+				t.Fatalf("database version = %d, want 5", currentVersion)
 			}
 			if err := validateSchema(t.Context(), db, currentVersion); err != nil {
 				t.Fatal(err)
@@ -127,7 +132,7 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			if pending.State != "unconfirmed" || pending.ErrorCode != "interrupted" {
 				t.Fatalf("interrupted write misrepresented: %+v", pending)
 			}
-			if version == 3 {
+			if version >= 3 {
 				purged, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "purged-request"})
 				if err != nil {
 					t.Fatal(err)
@@ -169,6 +174,9 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			observer, err := q.GetObserver(t.Context())
 			if err != nil || observer.Nick != "observer" || !bytes.Equal(observer.IdentityKeys, []byte{5}) || observer.IdentityAddress != "observer.b32.i2p" {
 				t.Fatalf("observer identity lost: %+v %v", observer, err)
+			}
+			if len(user.IdentityPool) != 0 || len(observer.IdentityPool) != 0 {
+				t.Fatal("migration invented destination keys")
 			}
 			retained, err := q.Prune(t.Context(), time.Now(), RetentionPolicy{Translations: time.Hour, BatchSize: 1})
 			if err != nil || retained.TranslationsDeleted != 0 {

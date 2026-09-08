@@ -46,12 +46,13 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseSlot()
 	if userID > 0 {
-		account, err := s.auth.Account(user)
+		account, err := s.auth.Account(ctx, user)
 		if err != nil {
 			writeError(w, 500, "identity unavailable")
 			return
 		}
 		releaseAccount, err := s.bridge.Acquire(ctx, account)
+		account.ReleaseSensitive()
 		if err != nil {
 			if errors.Is(err, irc.ErrAccountCapacity) {
 				rateLimited(w)

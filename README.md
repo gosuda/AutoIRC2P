@@ -1,6 +1,6 @@
 # AutoIRC2P
 
-Read and chat on IRC2P with optional automatic translation. Each account has its own I2P identity. The I2P router is built in—no separate daemon is needed.
+Read and chat on IRC2P with optional automatic translation. Each account has its own persistent I2P destination pool. The I2P router is built in—no separate daemon is needed.
 
 ## One-command Docker launch
 
@@ -93,18 +93,18 @@ Outgoing translation targets depend only on the room name, ignoring case:
 
 There is no automatic message-language detection or room-language inference. Open a message's details to see its original text, translation target, and timestamp. NickServ and ChanServ messages remain hidden from chat without disabling service authentication.
 
-The shared router and IRC reader stay active without browser users and retry startup failures and disconnects until the app shuts down. Account sessions also retry nickname conflicts while leased, allowing stale IRC registrations to expire without changing identity. Every retry waits **1 second**; tunnel preparation and network timeouts can take longer. Registered IRC sessions send **PING every 30 seconds** (sooner if half the configured idle timeout is shorter). Incoming traffic, including PONG, keeps the session alive; an unresponsive connection still expires under `IRC_IDLE_TIMEOUT`. Recovery preserves I2P identities and never replays outgoing messages.
+The shared router and IRC reader stay active without browser users and retry startup failures and disconnects until the app shuts down. Account sessions also retry nickname conflicts while leased, allowing stale IRC registrations to expire without changing the IRC nickname. Every retry waits **1 second**; tunnel preparation and network timeouts can take longer. Registered IRC sessions send **PING every 30 seconds** (sooner if half the configured idle timeout is shorter). Incoming traffic, including PONG, keeps the session alive; an unresponsive connection still expires under `IRC_IDLE_TIMEOUT`. Recovery never replays outgoing messages.
 
-Ordinary IRC reconnects reuse the existing I2P destination, identity, tunnels, and SDK route cache. Only the IRC stream is reopened; the five-minute initial destination-readiness wait is not repeated during LeaseSet renewal. Browser reconnects also reuse leased account sessions within `IRC_ACCOUNT_IDLE_GRACE` (default two minutes).
+Each account and the shared reader maintain **three I2P destinations**, isolated from other accounts. Failed attempts and disconnected sessions select the next destination in round-robin order; only one IRC connection is active per account. The original identity remains the first entry, and two additional identities are encrypted in the database and reused across restarts. Healthy destinations keep their tunnels and route caches; initial readiness is not repeated during LeaseSet renewal. Browser reconnects reuse leased account sessions within `IRC_ACCOUNT_IDLE_GRACE` (default two minutes).
 
-Missing or expired local tunnel routes trigger destination recreation instead of retrying a stale route indefinitely. A channel-level `437` response marks only that room unavailable. A failed browser session refresh leaves the existing feed connected; WebSocket retry backoff resets only after identity verification and the room snapshot. Account network status is not overwritten by shared-reader status.
+Missing or expired local tunnel routes recreate only the affected pool entry, using the same saved keys. A channel-level `437` response marks only that room unavailable. A failed browser session refresh leaves the existing feed connected; WebSocket retry backoff resets only after identity verification and the room snapshot. Account network status is not overwritten by shared-reader status.
 
 NickServ verification timeout does not discard a partially received IRC frame;
 the next read resumes it under the same 512-byte wire limit. An IRC `KILL` or
 `ERROR` containing `spambot kill` is a server-side refusal, not a tunnel timeout.
-Obtain the IRC operator's permission for bots and relaying. Stop the deployment
-or set `IRC_OFFLINE=1` while resolving a persistent refusal instead of repeatedly
-reconnecting or changing identities.
+The pool does not remove nickname-level limits or operator bans. Obtain the IRC
+operator's permission for bots and relaying; use `IRC_OFFLINE=1` while resolving
+an explicit persistent refusal.
 
 ## Customize
 
@@ -131,6 +131,8 @@ hops = 3
 Existing explicit hop settings are preserved. One hop offers less anonymity margin than multiple hops.
 
 Configured tunnel pool capacities are preserved. IVNP removes replaced tunnels from selection but retains their execution state until the original advertised expiration, so renewal does not interrupt peers still using cached leases.
+
+The default `IRC_MAX_ACCOUNTS=16` reserves capacity for 52 destinations, including the reader pool and IVNP's default destination. IVNP's 64-destination limit allows at most 20 registered accounts with three-entry pools; a lower configured destination limit reduces that maximum.
 
 ## Updates and data
 

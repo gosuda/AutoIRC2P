@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -10,6 +11,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/mail"
 	"regexp"
@@ -23,10 +25,14 @@ import (
 const Iterations = 600000
 
 var (
-	ErrCredentials  = errors.New("invalid credentials")
-	ErrRegistration = errors.New("registration unavailable for these details")
-	ErrInput        = errors.New("invalid account details")
-	nickPattern     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_\-]{2,23}$`)
+	ErrCredentials            = errors.New("invalid credentials")
+	ErrRegistration           = errors.New("registration unavailable for these details")
+	ErrInput                  = errors.New("invalid account details")
+	errIdentityPoolSize       = errors.New("invalid I2P destination pool size")
+	errIdentityPoolIncomplete = errors.New("incomplete I2P destination pool identity")
+	errIdentityPoolPrimary    = errors.New("duplicate primary I2P destination in pool")
+	errIdentityPoolDuplicate  = errors.New("duplicate I2P destination in pool")
+	nickPattern               = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_\-]{2,23}$`)
 )
 
 type User struct {
@@ -94,6 +100,7 @@ func (s *Service) Register(ctx context.Context, email, nick, proof string) (stor
 	if err != nil {
 		return store.User{}, err
 	}
+	defer clear(identity.Keys)
 	salt := make([]byte, 32)
 	rand.Read(salt)
 	user, err := s.q.CreateUser(ctx, store.CreateUserParams{Email: email, Nick: nick, PasswordSalt: salt, PasswordHash: PasswordDigest(salt, derived), IrcPassword: s.Seal([]byte(Token()), "irc-password:"+email), IdentityKeys: s.Seal(identity.Keys, "identity:"+email), IdentityAddress: identity.Address, CreatedAt: time.Now().UnixMilli()})
@@ -155,30 +162,49 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 	hash := sha256.Sum256([]byte(token))
 	return s.q.DeleteSession(ctx, hash[:])
 }
-func (s *Service) Account(u store.User) (irc.Account, error) {
+func (s *Service) Account(ctx context.Context, u store.User) (irc.Account, error) {
 	keys, err := s.Open(u.IdentityKeys, "identity:"+u.Email)
 	if err != nil {
 		return irc.Account{}, err
 	}
+	account := irc.Account{ID: u.ID, Nick: u.Nick, Email: u.Nick + "@irc.invalid", Identity: irc.Identity{Keys: keys, Address: u.IdentityAddress}, Registered: u.IrcRegistered != 0}
 	password, err := s.Open(u.IrcPassword, "irc-password:"+u.Email)
 	if err != nil {
+		account.ReleaseSensitive()
 		return irc.Account{}, err
 	}
-	return irc.Account{ID: u.ID, Nick: u.Nick, Password: string(password), Email: u.Nick + "@irc.invalid", Identity: irc.Identity{Keys: keys, Address: u.IdentityAddress}, Registered: u.IrcRegistered != 0}, nil
+	defer clear(password)
+	pool := u.IdentityPool
+	if len(pool) == 0 {
+		pool, err = s.q.UserIdentityPool(ctx, u.ID)
+		if err != nil {
+			account.ReleaseSensitive()
+			return irc.Account{}, err
+		}
+	}
+	account.Alternates, err = s.loadIdentityPool(ctx, account.Identity, pool, "identity-pool:"+u.Email, func(ctx context.Context, encrypted []byte) ([]byte, error) {
+		return s.q.InitializeUserIdentityPool(ctx, store.InitializeUserIdentityPoolParams{ID: u.ID, IdentityPool: encrypted})
+	})
+	if err != nil {
+		account.ReleaseSensitive()
+		return irc.Account{}, err
+	}
+	account.Password = string(password)
+	return account, nil
 }
 func (s *Service) Observer(ctx context.Context) (irc.Account, error) {
 	row, err := s.q.GetObserver(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
-		identity, err := irc.GenerateIdentity()
+		identity, identityErr := irc.GenerateIdentity()
+		if identityErr != nil {
+			return irc.Account{}, identityErr
+		}
+		err = s.q.CreateObserver(ctx, store.CreateObserverParams{Nick: "guest" + Token()[:10], IdentityKeys: s.Seal(identity.Keys, "observer"), IdentityAddress: identity.Address})
+		clear(identity.Keys)
 		if err != nil {
 			return irc.Account{}, err
 		}
-		nick := "guest" + Token()[:10]
-		err = s.q.CreateObserver(ctx, store.CreateObserverParams{Nick: nick, IdentityKeys: s.Seal(identity.Keys, "observer"), IdentityAddress: identity.Address})
-		if err != nil {
-			return irc.Account{}, err
-		}
-		return irc.Account{Nick: nick, Identity: identity}, nil
+		row, err = s.q.GetObserver(ctx)
 	}
 	if err != nil {
 		return irc.Account{}, err
@@ -187,5 +213,83 @@ func (s *Service) Observer(ctx context.Context) (irc.Account, error) {
 	if err != nil {
 		return irc.Account{}, err
 	}
-	return irc.Account{Nick: row.Nick, Identity: irc.Identity{Keys: keys, Address: row.IdentityAddress}}, nil
+	account := irc.Account{Nick: row.Nick, Identity: irc.Identity{Keys: keys, Address: row.IdentityAddress}}
+	account.Alternates, err = s.loadIdentityPool(ctx, account.Identity, row.IdentityPool, "observer-pool", s.q.InitializeObserverIdentityPool)
+	if err != nil {
+		account.ReleaseSensitive()
+		return irc.Account{}, err
+	}
+	return account, nil
+}
+
+func (s *Service) loadIdentityPool(ctx context.Context, primary irc.Identity, encrypted []byte, purpose string, initialize func(context.Context, []byte) ([]byte, error)) ([]irc.Identity, error) {
+	if len(encrypted) != 0 {
+		return s.openIdentityPool(primary, encrypted, purpose)
+	}
+	generated := irc.Account{Alternates: make([]irc.Identity, 0, irc.DestinationPoolSize-1)}
+	defer generated.ReleaseSensitive()
+	for range irc.DestinationPoolSize - 1 {
+		identity, err := irc.GenerateIdentity()
+		if err != nil {
+			return nil, err
+		}
+		generated.Alternates = append(generated.Alternates, identity)
+	}
+	if err := validateIdentityPool(primary, generated.Alternates); err != nil {
+		return nil, err
+	}
+	plaintext, err := json.Marshal(generated.Alternates)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(plaintext)
+	proposed := s.Seal(plaintext, purpose)
+	winner, err := initialize(ctx, proposed)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Equal(winner, proposed) {
+		pool := generated.Alternates
+		generated.Alternates = nil
+		return pool, nil
+	}
+	return s.openIdentityPool(primary, winner, purpose)
+}
+
+func (s *Service) openIdentityPool(primary irc.Identity, encrypted []byte, purpose string) ([]irc.Identity, error) {
+	plaintext, err := s.Open(encrypted, purpose)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(plaintext)
+	var decoded irc.Account
+	if err := json.Unmarshal(plaintext, &decoded.Alternates); err != nil {
+		decoded.ReleaseSensitive()
+		return nil, err
+	}
+	if err := validateIdentityPool(primary, decoded.Alternates); err != nil {
+		decoded.ReleaseSensitive()
+		return nil, err
+	}
+	return decoded.Alternates, nil
+}
+
+func validateIdentityPool(primary irc.Identity, pool []irc.Identity) error {
+	if len(pool) != irc.DestinationPoolSize-1 {
+		return errIdentityPoolSize
+	}
+	for i, identity := range pool {
+		if len(identity.Keys) == 0 || identity.Address == "" {
+			return errIdentityPoolIncomplete
+		}
+		if identity.Address == primary.Address || bytes.Equal(identity.Keys, primary.Keys) {
+			return errIdentityPoolPrimary
+		}
+		for _, previous := range pool[:i] {
+			if identity.Address == previous.Address || bytes.Equal(identity.Keys, previous.Keys) {
+				return errIdentityPoolDuplicate
+			}
+		}
+	}
+	return nil
 }

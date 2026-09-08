@@ -104,7 +104,7 @@ func (events *recoveryEvents) statusCount(state string) int {
 	return count
 }
 
-func newRecoveryManager(t *testing.T) (*Manager, <-chan recoveryAttempt, *recoveryEvents) {
+func newRecoveryManager(t *testing.T) (*Manager, chan recoveryAttempt, *recoveryEvents) {
 	t.Helper()
 	attempts := make(chan recoveryAttempt, 8)
 	manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
@@ -448,5 +448,165 @@ func TestReconnectReusesReadyDestinationDuringLeaseSetRenewal(t *testing.T) {
 			t.Fatal("IRC reconnect replaced a reusable I2P session")
 		}
 		joinRecoveryRoom(t, manager, second, account)
+	})
+}
+
+func TestReconnectRotatesMaintainedDestinationsBeforeReuse(t *testing.T) {
+	account := pooledLeaseAccount(t, 1, "alice")
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		var endpoints []*recoveryEndpoint
+		manager.createDestination = func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+			endpoint := &recoveryEndpoint{local: spec.Local, attempts: attempts, closed: make(chan struct{})}
+			endpoints = append(endpoints, endpoint)
+			return endpoint, nil
+		}
+		release, err := manager.Acquire(t.Context(), account)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		account.ReleaseSensitive()
+		first := receiveRecoveryAttempt(t, attempts, account)
+		if len(endpoints) != DestinationPoolSize {
+			t.Fatalf("maintained destinations before first IRC dial = %d, want %d", len(endpoints), DestinationPoolSize)
+		}
+		current := first
+		for _, selected := range []int{1, 2, 0, 1} {
+			joinRecoveryRoom(t, manager, current, account)
+			<-time.After(2 * time.Second)
+			synctest.Wait()
+			select {
+			case <-attempts:
+				t.Fatal("opened another IRC socket while the selected session was active")
+			default:
+			}
+			current.endpoint.mu.Lock()
+			current.endpoint.readiness = make(chan struct{})
+			current.endpoint.mu.Unlock()
+			writeRecoveryLine(t, current, "ERROR :Disconnected")
+			previous := current
+			expected := account
+			expected.Identity = account.identityAt(selected)
+			current = retryRecoveryAttempt(t, attempts, expected, time.Second)
+			if _, err := previous.reader.ReadString('\n'); err == nil {
+				t.Fatal("previous IRC socket remained open after reconnect")
+			}
+			if current.endpoint != endpoints[selected] || len(endpoints) != DestinationPoolSize {
+				t.Fatalf("slot %d recreated a maintained destination", selected)
+			}
+		}
+		if err := manager.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for i, endpoint := range endpoints {
+			select {
+			case <-endpoint.closed:
+			default:
+				t.Errorf("shutdown left destination slot %d open", i)
+			}
+			if _, err := endpoint.local.Sign([]byte("after shutdown")); err == nil {
+				t.Errorf("shutdown left destination slot %d private keys usable", i)
+			}
+		}
+	})
+}
+
+func TestPoolReplacesOnlyStaleSelectedDestination(t *testing.T) {
+	observer := pooledLeaseAccount(t, 0, "observer")
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		var endpoints []*recoveryEndpoint
+		manager.createDestination = func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+			endpoint := &recoveryEndpoint{local: spec.Local, attempts: attempts, closed: make(chan struct{})}
+			endpoints = append(endpoints, endpoint)
+			return endpoint, nil
+		}
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		current := receiveRecoveryAttempt(t, attempts, observer)
+		primary := current.endpoint
+		primary.mu.Lock()
+		primary.dialFailure = dataplane.TunnelErrCircuitNotFound
+		primary.mu.Unlock()
+		for i, selected := range []int{1, 2, 1, 2, 0} {
+			writeRecoveryLine(t, current, ":irc.example.i2p 433 * observer :Nickname in use")
+			expected := observer
+			expected.Identity = observer.identityAt(selected)
+			delay := time.Second
+			if i == 2 {
+				delay = 2 * time.Second
+			}
+			current = retryRecoveryAttempt(t, attempts, expected, delay)
+			if selected != 0 && current.endpoint != endpoints[selected] {
+				t.Fatalf("stale primary replaced healthy slot %d", selected)
+			}
+		}
+		if current.endpoint == primary {
+			t.Fatal("stale destination endpoint was not replaced")
+		}
+		if len(endpoints) != DestinationPoolSize+1 {
+			t.Fatalf("created %d endpoints, want one replacement beyond the pool", len(endpoints))
+		}
+		select {
+		case <-primary.closed:
+		default:
+			t.Fatal("stale primary endpoint was not closed")
+		}
+		joinRecoveryRoom(t, manager, current, observer)
+	})
+}
+
+var errDestinationCreation = errors.New("destination temporarily unavailable")
+
+func TestPoolCreationFailureDoesNotDiscardHealthyDestinations(t *testing.T) {
+	observer := pooledLeaseAccount(t, 0, "observer")
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		var endpoints []*recoveryEndpoint
+		manager.createDestination = func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+			endpoint := &recoveryEndpoint{local: spec.Local, attempts: attempts, closed: make(chan struct{})}
+			endpoints = append(endpoints, endpoint)
+			if len(endpoints) == 1 {
+				return endpoint, errDestinationCreation
+			}
+			return endpoint, nil
+		}
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		expected := observer
+		expected.Identity = observer.Alternates[0]
+		current := receiveRecoveryAttempt(t, attempts, expected)
+		if len(endpoints) != DestinationPoolSize || current.endpoint != endpoints[1] {
+			t.Fatal("initial creation failure prevented using an already-created alternate")
+		}
+		select {
+		case <-endpoints[0].closed:
+		default:
+			t.Fatal("endpoint returned with a creation error leaked")
+		}
+		for _, selected := range []int{2, 0, 1} {
+			writeRecoveryLine(t, current, ":irc.example.i2p 433 * observer :Nickname in use")
+			expected.Identity = observer.identityAt(selected)
+			current = retryRecoveryAttempt(t, attempts, expected, time.Second)
+		}
+		if current.endpoint != endpoints[1] || len(endpoints) != DestinationPoolSize+1 {
+			t.Fatal("partial creation recovery discarded a healthy alternate")
+		}
+		if err := manager.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for i, endpoint := range endpoints {
+			select {
+			case <-endpoint.closed:
+			default:
+				t.Errorf("partial creation cleanup left endpoint %d open", i)
+			}
+			if _, err := endpoint.local.Sign([]byte("after partial creation cleanup")); err == nil {
+				t.Errorf("partial creation cleanup left endpoint %d private keys usable", i)
+			}
+		}
 	})
 }

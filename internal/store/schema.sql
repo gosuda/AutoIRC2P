@@ -7,6 +7,7 @@ CREATE TABLE users (
  irc_password BLOB NOT NULL,
  identity_keys BLOB NOT NULL,
  identity_address TEXT NOT NULL,
+ identity_pool BLOB NOT NULL DEFAULT X'',
  irc_registered INTEGER NOT NULL DEFAULT 0,
  created_at INTEGER NOT NULL
 );
@@ -20,7 +21,8 @@ CREATE TABLE observer (
  id INTEGER PRIMARY KEY CHECK (id = 1),
  nick TEXT NOT NULL,
  identity_keys BLOB NOT NULL,
- identity_address TEXT NOT NULL
+ identity_address TEXT NOT NULL,
+ identity_pool BLOB NOT NULL DEFAULT X''
 );
 CREATE TABLE messages (
  id INTEGER PRIMARY KEY AUTOINCREMENT,

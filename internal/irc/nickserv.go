@@ -1,6 +1,8 @@
 package irc
 
-import "strings"
+import (
+	"strings"
+)
 
 // Service credentials are routed to the server learned from WHOIS, never merely
 // to a nickname. Numeric 313 is required: ordinary clients cannot assert it.

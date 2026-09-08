@@ -8,12 +8,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gosuda/AutoIRC2P/internal/auth"
+	"github.com/gosuda/AutoIRC2P/internal/irc"
 	"github.com/gosuda/AutoIRC2P/internal/store"
 )
 
@@ -72,6 +74,12 @@ func TestLiveWALBackupRestoresAuthenticationAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(observer.ReleaseSensitive)
+	original, err := f.service.Account(t.Context(), f.user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(original.ReleaseSensitive)
 	if err := f.q.RegisterIRC(t.Context(), f.user.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -150,14 +158,11 @@ func TestLiveWALBackupRestoresAuthenticationAndIdentity(t *testing.T) {
 	if err != nil || session.ID != f.user.ID {
 		t.Fatalf("restored session: user=%d err=%v", session.ID, err)
 	}
-	account, err := recovered.Account(login)
+	account, err := recovered.Account(t.Context(), login)
 	if err != nil {
 		t.Fatal(err)
 	}
-	original, err := f.service.Account(f.user)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(account.ReleaseSensitive)
 	if !bytes.Equal(account.Identity.Keys, original.Identity.Keys) || account.Identity.Address != original.Identity.Address || account.Password != original.Password || !account.Registered {
 		t.Fatal("IRC account identity or credentials changed")
 	}
@@ -165,8 +170,19 @@ func TestLiveWALBackupRestoresAuthenticationAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(restoredObserver.ReleaseSensitive)
 	if restoredObserver.Nick != observer.Nick || restoredObserver.Identity.Address != observer.Identity.Address || !bytes.Equal(restoredObserver.Identity.Keys, observer.Identity.Keys) {
 		t.Fatal("observer identity changed")
+	}
+	for _, pair := range []struct{ got, want irc.Account }{{account, original}, {restoredObserver, observer}} {
+		if len(pair.got.Alternates) != irc.DestinationPoolSize-1 || len(pair.want.Alternates) != irc.DestinationPoolSize-1 {
+			t.Fatal("backup lost alternate destinations")
+		}
+		for i, identity := range pair.got.Alternates {
+			if identity.Address != pair.want.Alternates[i].Address || !bytes.Equal(identity.Keys, pair.want.Alternates[i].Keys) {
+				t.Errorf("restored alternate destination %d changed", i)
+			}
+		}
 	}
 	messages, err := q.Messages(t.Context(), store.MessagesParams{Room: "#one", ID: message.ID + 2})
 	if err != nil || len(messages) != 1 || messages[0].Original != "committed WAL text" {
@@ -178,6 +194,123 @@ func TestLiveWALBackupRestoresAuthenticationAndIdentity(t *testing.T) {
 	}
 }
 
+func TestHistoricalBackupsRestoreWithoutDestinationPoolColumns(t *testing.T) {
+	for _, version := range []int{1, 2, 3, 4} {
+		t.Run(fmt.Sprintf("version%d", version), func(t *testing.T) {
+			f := newRecoveryFixture(t)
+			observer, err := f.service.Observer(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(observer.ReleaseSensitive)
+			path := filepath.Join(f.root, "historical.sqlite")
+			legacy, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := legacy.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			_, err = legacy.ExecContext(t.Context(), `
+CREATE TABLE users (id INTEGER PRIMARY KEY,email TEXT NOT NULL UNIQUE,nick TEXT NOT NULL UNIQUE COLLATE NOCASE,password_salt BLOB NOT NULL,password_hash BLOB NOT NULL,irc_password BLOB NOT NULL,identity_keys BLOB NOT NULL,identity_address TEXT NOT NULL,irc_registered INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);
+CREATE TABLE sessions (token_hash BLOB PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL);
+CREATE TABLE observer (id INTEGER PRIMARY KEY,nick TEXT NOT NULL,identity_keys BLOB NOT NULL,identity_address TEXT NOT NULL);
+CREATE TABLE messages (id INTEGER PRIMARY KEY,room TEXT NOT NULL,nick TEXT NOT NULL,original TEXT NOT NULL,source_language TEXT NOT NULL,wire_language TEXT NOT NULL,service INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);
+CREATE TABLE translations (cache_key TEXT PRIMARY KEY,translated TEXT NOT NULL);
+CREATE TABLE send_requests (user_id INTEGER NOT NULL REFERENCES users(id),request_id TEXT NOT NULL,state TEXT NOT NULL,message_id INTEGER NOT NULL DEFAULT 0,room TEXT NOT NULL DEFAULT '',nick TEXT NOT NULL DEFAULT '',original TEXT NOT NULL DEFAULT '',wire_text TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL DEFAULT 0,echo_consumed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,request_id));
+PRAGMA user_version=1;`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = legacy.ExecContext(t.Context(), "INSERT INTO users VALUES(?,?,?,?,?,?,?,?,1,?)", f.user.ID, f.user.Email, f.user.Nick, f.user.PasswordSalt, f.user.PasswordHash, f.user.IrcPassword, f.user.IdentityKeys, f.user.IdentityAddress, f.user.CreatedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = legacy.ExecContext(t.Context(), "INSERT INTO observer VALUES(1,?,?,?)", observer.Nick, f.service.Seal(observer.Identity.Keys, "observer"), observer.Identity.Address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = legacy.ExecContext(t.Context(), `INSERT INTO messages VALUES(7,'#one','alice','historical text','en','en',0,1000);
+INSERT INTO send_requests VALUES(1,'confirmed-request','sent',7,'#one','alice','historical text','wire',1000,1);`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for next := 2; next <= version; next++ {
+				migration, err := os.ReadFile(fmt.Sprintf("migration%d.sql", next))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := legacy.ExecContext(t.Context(), string(migration)+fmt.Sprintf("\nPRAGMA user_version=%d;", next)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := legacy.Close(); err != nil {
+				t.Fatal(err)
+			}
+			backup := filepath.Join(f.root, "historical-backup")
+			if err := store.Backup(t.Context(), path, f.keyPath, backup); err != nil {
+				t.Fatal(err)
+			}
+			restored := filepath.Join(f.root, "restored")
+			if err := store.Restore(t.Context(), backup, restored); err != nil {
+				t.Fatal(err)
+			}
+			db, q, err := store.NewSQLite(t.Context(), filepath.Join(restored, "chat.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			key, err := os.ReadFile(filepath.Join(restored, "application.key"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer clear(key)
+			recovered, err := auth.New(q, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			login, err := recovered.Login(t.Context(), f.user.Email, f.proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			account, err := recovered.Account(t.Context(), login)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(account.ReleaseSensitive)
+			primary, err := f.service.Open(f.user.IdentityKeys, "identity:"+f.user.Email)
+			defer clear(primary)
+			if err != nil || !bytes.Equal(account.Identity.Keys, primary) || account.Identity.Address != f.user.IdentityAddress || !account.Registered {
+				t.Fatalf("historical account identity changed: %v", err)
+			}
+			restoredObserver, err := recovered.Observer(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(restoredObserver.ReleaseSensitive)
+			if restoredObserver.Nick != observer.Nick || restoredObserver.Identity.Address != observer.Identity.Address || !bytes.Equal(restoredObserver.Identity.Keys, observer.Identity.Keys) {
+				t.Fatal("historical observer identity changed")
+			}
+			if len(account.Alternates) != irc.DestinationPoolSize-1 || len(restoredObserver.Alternates) != irc.DestinationPoolSize-1 {
+				t.Fatal("historical identities did not acquire destination pools")
+			}
+			messages, err := q.Messages(t.Context(), store.MessagesParams{Room: "#one", ID: 8})
+			if err != nil || len(messages) != 1 || messages[0].Original != "historical text" || messages[0].SenderRequestID != "confirmed-request" {
+				t.Fatalf("historical message ownership lost: %v", err)
+			}
+			claimed, err := q.ClaimSend(t.Context(), store.ClaimSendParams{UserID: f.user.ID, RequestID: "confirmed-request", State: "translating"})
+			if err != nil || claimed != 0 {
+				t.Fatalf("historical confirmed send reclaimed: claimed=%d err=%v", claimed, err)
+			}
+		})
+	}
+}
 func TestRestoreRefusesCorruptOrMismatchedBundles(t *testing.T) {
 	for _, damage := range []string{"database", "manifest", "key", "mismatched-key", "symlink", "extra-file"} {
 		t.Run(damage, func(t *testing.T) {
@@ -318,9 +451,16 @@ func TestBackupRejectsWrongKeyAndUnsupportedSchema(t *testing.T) {
 }
 
 func TestRestoreValidatesDatabaseBeyondChecksums(t *testing.T) {
-	for _, corruption := range []string{"integrity", "foreign-key", "schema"} {
+	for _, corruption := range []string{"integrity", "foreign-key", "schema", "user-pool", "observer-pool", "user-pool-column", "observer-pool-column"} {
 		t.Run(corruption, func(t *testing.T) {
 			f := newRecoveryFixture(t)
+			if strings.HasPrefix(corruption, "observer-") {
+				observer, err := f.service.Observer(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(observer.ReleaseSensitive)
+			}
 			backup := filepath.Join(f.root, "backup")
 			if err := store.Backup(t.Context(), f.path, f.keyPath, backup); err != nil {
 				t.Fatal(err)
@@ -336,8 +476,17 @@ func TestRestoreValidatesDatabaseBeyondChecksums(t *testing.T) {
 					t.Fatal(err)
 				}
 				statement := "PRAGMA foreign_keys=OFF; UPDATE sessions SET user_id=999999;"
-				if corruption == "schema" {
+				switch corruption {
+				case "schema":
 					statement = "DROP TABLE translations;"
+				case "user-pool":
+					statement = "UPDATE users SET identity_pool=X'00';"
+				case "observer-pool":
+					statement = "UPDATE observer SET identity_pool=X'00';"
+				case "user-pool-column":
+					statement = "ALTER TABLE users DROP COLUMN identity_pool;"
+				case "observer-pool-column":
+					statement = "ALTER TABLE observer DROP COLUMN identity_pool;"
 				}
 				_, operationErr := db.ExecContext(t.Context(), statement)
 				if err := errors.Join(operationErr, db.Close()); err != nil {

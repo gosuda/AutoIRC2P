@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"gosuda.org/ivnp"
 	"testing"
+
+	"gosuda.org/ivnp"
 )
 
 func TestIdentityRestorePreservesSigningAndAddress(t *testing.T) {
@@ -96,5 +97,32 @@ func TestGeneratedIdentityOpensStreamingDestination(t *testing.T) {
 	}()
 	if endpoint.B32() != identity.Address {
 		t.Fatal("streaming endpoint changed identity")
+	}
+}
+
+func TestAccountReleaseSensitiveErasesEveryCallerKey(t *testing.T) {
+	account := pooledLeaseAccount(t, 1, "alice")
+	identities := make([]Identity, DestinationPoolSize)
+	for i := range identities {
+		identities[i] = account.identityAt(i)
+	}
+	account.ReleaseSensitive()
+	if account.Password != "" {
+		t.Error("released account retains its password")
+	}
+	for i, identity := range identities {
+		for _, value := range identity.Keys {
+			if value != 0 {
+				t.Errorf("released account retains private bytes in destination slot %d", i)
+				break
+			}
+		}
+		if account.identityAt(i).Address != identity.Address {
+			t.Errorf("releasing private bytes changed destination slot %d metadata", i)
+		}
+		if local, err := restoreIdentity(identity); err == nil {
+			local.ReleaseSensitive()
+			t.Errorf("released caller key in destination slot %d remains usable", i)
+		}
 	}
 }

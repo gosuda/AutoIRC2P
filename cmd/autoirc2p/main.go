@@ -116,7 +116,9 @@ func run() (err error) {
 			observer.Nick = cfg.ObserverNick
 			observer.Password = cfg.ObserverPassword
 		}
-		if err = bridge.ConnectObserver(ctx, observer); err != nil {
+		err = bridge.ConnectObserver(ctx, observer)
+		observer.ReleaseSensitive()
+		if err != nil {
 			return err
 		}
 	} else {

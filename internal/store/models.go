@@ -20,6 +20,7 @@ type Observer struct {
 	Nick            string `json:"nick"`
 	IdentityKeys    []byte `json:"identity_keys"`
 	IdentityAddress string `json:"identity_address"`
+	IdentityPool    []byte `json:"identity_pool"`
 }
 
 type SendRequest struct {
@@ -61,6 +62,7 @@ type User struct {
 	IrcPassword     []byte `json:"irc_password"`
 	IdentityKeys    []byte `json:"identity_keys"`
 	IdentityAddress string `json:"identity_address"`
+	IdentityPool    []byte `json:"identity_pool"`
 	IrcRegistered   int64  `json:"irc_registered"`
 	CreatedAt       int64  `json:"created_at"`
 }

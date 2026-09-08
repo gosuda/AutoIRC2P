@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -56,6 +59,20 @@ func leaseAccount(t *testing.T, id int64, nick string) Account {
 	}
 	t.Cleanup(func() { clear(identity.Keys) })
 	return Account{ID: id, Nick: nick, Password: "offline-only-password", Identity: identity}
+}
+
+func pooledLeaseAccount(t *testing.T, id int64, nick string) Account {
+	t.Helper()
+	account := leaseAccount(t, id, nick)
+	for range DestinationPoolSize - 1 {
+		identity, err := GenerateIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { clear(identity.Keys) })
+		account.Alternates = append(account.Alternates, identity)
+	}
+	return account
 }
 
 func leaseManager(t *testing.T, capacity int, create func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error)) *Manager {
@@ -413,4 +430,176 @@ func TestShutdownCancelsBlockedAccountSend(t *testing.T) {
 			t.Fatalf("shutdown room state = %s", got)
 		}
 	})
+}
+
+func TestPoolGraceExpiryReleasesEveryDestination(t *testing.T) {
+	account := pooledLeaseAccount(t, 1, "alice")
+	synctest.Test(t, func(t *testing.T) {
+		created := make(chan *leaseEndpoint, DestinationPoolSize)
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+			endpoint := waitingEndpoint(spec)
+			created <- endpoint
+			return endpoint, nil
+		})
+		release, err := manager.Acquire(t.Context(), account)
+		if err != nil {
+			t.Fatal(err)
+		}
+		endpoints := make([]*leaseEndpoint, DestinationPoolSize)
+		for i := range endpoints {
+			endpoints[i] = <-created
+			if endpoints[i].local.B32() != account.identityAt(i).Address {
+				t.Fatalf("pool slot %d lost its persisted identity", i)
+			}
+		}
+		release()
+		for _, endpoint := range endpoints {
+			<-endpoint.closed
+		}
+		synctest.Wait()
+		for i, endpoint := range endpoints {
+			if _, err := endpoint.local.Sign([]byte("expired pool")); err == nil {
+				t.Errorf("expired pool slot %d still owns private keys", i)
+			}
+		}
+		if _, err := manager.Retain(t.Context(), account.ID); !errors.Is(err, ErrNotConnected) {
+			t.Fatalf("retain after pool expiry = %v, want not connected", err)
+		}
+	})
+}
+
+func TestAdmissionRejectsDuplicateAndOversizedDestinationPools(t *testing.T) {
+	account := pooledLeaseAccount(t, 1, "alice")
+	other := pooledLeaseAccount(t, 2, "bob")
+	for _, tc := range []struct {
+		name       string
+		alternates []Identity
+	}{
+		{name: "primary repeated", alternates: []Identity{account.Identity}},
+		{name: "alternate repeated", alternates: []Identity{other.Identity, other.Identity}},
+		{name: "pool over capacity", alternates: []Identity{other.Identity, other.Alternates[0], other.Alternates[1]}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				manager := leaseManager(t, 1, func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+					t.Error("invalid pool created an endpoint")
+					return nil, net.ErrClosed
+				})
+				candidate := account
+				candidate.Alternates = tc.alternates
+				if release, err := manager.Acquire(t.Context(), candidate); !errors.Is(err, errInvalidAccount) {
+					if release != nil {
+						release()
+					}
+					t.Fatalf("invalid pool admission = %v, want invalid account", err)
+				}
+			})
+		})
+	}
+}
+
+func TestAdmissionKeepsAccountAndObserverPoolsDisjoint(t *testing.T) {
+	observer := pooledLeaseAccount(t, 0, "observer")
+	account := pooledLeaseAccount(t, 1, "alice")
+	synctest.Test(t, func(t *testing.T) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+			return waitingEndpoint(spec), nil
+		})
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			name      string
+			identity  Identity
+			alternate Identity
+		}{
+			{name: "primary collides with alternate", identity: observer.Alternates[0], alternate: account.Alternates[0]},
+			{name: "alternate collides with primary", identity: account.Identity, alternate: observer.Identity},
+			{name: "alternates collide", identity: account.Identity, alternate: observer.Alternates[1]},
+		} {
+			candidate := account
+			candidate.Identity = tc.identity
+			candidate.Alternates = []Identity{tc.alternate}
+			if release, err := manager.Acquire(t.Context(), candidate); !errors.Is(err, errInvalidAccount) {
+				if release != nil {
+					release()
+				}
+				t.Fatalf("%s admission = %v, want invalid account", tc.name, err)
+			}
+		}
+		release, err := manager.Acquire(t.Context(), account)
+		if err != nil {
+			t.Fatalf("disjoint account pool admission: %v", err)
+		}
+		defer release()
+		changed := account
+		changed.Alternates = []Identity{account.Alternates[1], account.Alternates[0]}
+		if extra, err := manager.Acquire(t.Context(), changed); !errors.Is(err, errInvalidAccount) {
+			if extra != nil {
+				extra()
+			}
+			t.Fatalf("changed retry order on reacquisition = %v, want invalid account", err)
+		}
+	})
+}
+
+func TestAdmissionRejectsUnrestorableAlternateWithoutReservingCapacity(t *testing.T) {
+	account := pooledLeaseAccount(t, 1, "alice")
+	synctest.Test(t, func(t *testing.T) {
+		created := make(chan *leaseEndpoint, DestinationPoolSize)
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+			endpoint := waitingEndpoint(spec)
+			created <- endpoint
+			return endpoint, nil
+		})
+		invalid := account
+		invalid.Alternates = []Identity{account.Alternates[0], {Address: account.Alternates[1].Address, Keys: []byte("invalid private destination")}}
+		if release, err := manager.Acquire(t.Context(), invalid); err == nil {
+			release()
+			t.Fatal("unrestorable alternate admitted")
+		}
+		select {
+		case <-created:
+			t.Fatal("partially restored pool created an endpoint")
+		default:
+		}
+		release, err := manager.Acquire(t.Context(), account)
+		if err != nil {
+			t.Fatalf("failed restoration retained capacity: %v", err)
+		}
+		defer release()
+		for i := range DestinationPoolSize {
+			endpoint := <-created
+			if _, err := endpoint.local.Sign([]byte("after rejected restoration")); err != nil {
+				t.Errorf("admission corrupted caller identity %d: %v", i, err)
+			}
+		}
+	})
+}
+
+func TestManagerRejectsInsufficientDestinationCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		capacity    int
+		maxAccounts int
+	}{
+		{name: "default accounts exceed configured capacity", capacity: 51},
+		{name: "account limit cannot overflow pool budget", capacity: 64, maxAccounts: int(^uint(0) >> 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ivnp.conf")
+			if err := os.WriteFile(path, []byte(fmt.Sprintf("[state]\nmax_destinations = %d\n", tc.capacity)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := New(Config{ConfigPath: path, Server: "offline.b32.i2p:6667", Rooms: []string{"#first"}, MaxAccounts: tc.maxAccounts}, func(Event) {})
+			if manager != nil {
+				if closeErr := manager.Close(); closeErr != nil {
+					t.Error(closeErr)
+				}
+			}
+			if !errors.Is(err, errInvalidConfig) {
+				t.Fatalf("insufficient destination capacity = %v, want invalid configuration", err)
+			}
+		})
+	}
 }

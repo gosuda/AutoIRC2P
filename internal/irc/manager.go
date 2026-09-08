@@ -16,7 +16,6 @@ import (
 	"github.com/rs/zerolog/log"
 	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/dataplane"
-	"gosuda.org/ivnp/foundation"
 )
 
 var (
@@ -25,12 +24,14 @@ var (
 	ErrObserverReadOnly = errors.New("observer cannot send messages")
 	ErrAccountCapacity  = errors.New("IRC account capacity reached")
 	errInvalidConfig    = errors.New("IRC requires an I2P server with port, a config path, and configured rooms")
-	errInvalidAccount   = errors.New("IRC account has invalid ID, password, or duplicate identity")
+	errInvalidAccount   = errors.New("IRC account has invalid ID, password, or identity pool")
 	errNickUnavailable  = errors.New("nickname is unavailable; choose another nickname or recover it through the IRC network")
 	errNoReadiness      = errors.New("IVNP destination does not support readiness")
 )
 
 const reconnectDelay = time.Second
+
+const DestinationPoolSize = 3
 
 type Account struct {
 	ID         int64
@@ -38,6 +39,7 @@ type Account struct {
 	Password   string
 	Email      string
 	Identity   Identity
+	Alternates []Identity
 	Registered bool
 }
 
@@ -85,11 +87,11 @@ type Manager struct {
 }
 
 type accountConnection struct {
-	account Account
-	local   *foundation.LocalDestination
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{}
+	account      Account
+	destinations []destinationSlot
+	ctx          context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
 	// Lease fields are protected by Manager.mu, not the connection mutex.
 	leases      int
 	closing     bool
@@ -143,9 +145,10 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load IVNP configuration: %w", err)
 	}
-	// IVNP also owns its default destination; the observer has a separate one.
-	if cfg.MaxAccounts > configuration.State.MaxDestinations-2 {
-		return nil, fmt.Errorf("IRC account limit exceeds IVNP destination capacity: %w", errInvalidConfig)
+	// Reserve the observer pool and IVNP's default destination as well.
+	maxAccounts := (configuration.State.MaxDestinations-1)/DestinationPoolSize - 1
+	if cfg.MaxAccounts > maxAccounts {
+		return nil, fmt.Errorf("IRC MaxAccounts=%d with %d destinations per account and observer exceeds IVNP state.max_destinations=%d (maximum IRC MaxAccounts=%d): %w", cfg.MaxAccounts, DestinationPoolSize, configuration.State.MaxDestinations, max(0, maxAccounts), errInvalidConfig)
 	}
 	openRouter := func() (*routerRuntime, error) { return openRouterRuntime(configuration) }
 	router, err := openRouter()
@@ -177,8 +180,8 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// ConnectObserver pins account zero until manager shutdown. Identity.Keys stays
-// caller-owned; the manager restores and owns a separate private destination.
+// ConnectObserver pins account zero until manager shutdown. All identity keys stay
+// caller-owned; the manager restores and owns separate private destinations.
 func (m *Manager) ConnectObserver(ctx context.Context, account Account) error {
 	if account.ID != 0 {
 		return errInvalidAccount
@@ -208,6 +211,9 @@ func (m *Manager) acquire(ctx context.Context, account Account) (func(), error) 
 	if shortPassword || invalidPassword {
 		return nil, errInvalidAccount
 	}
+	if err := validateIdentityPool(account); err != nil {
+		return nil, err
+	}
 	for {
 		m.mu.Lock()
 		if err := m.admissionErrorLocked(ctx); err != nil {
@@ -227,7 +233,7 @@ func (m *Manager) acquire(ctx context.Context, account Account) (func(), error) 
 					continue
 				}
 			}
-			if state.account.Identity.Address != account.Identity.Address || state.account.Nick != account.Nick {
+			if !sameIdentityPool(state.account, account) || state.account.Nick != account.Nick {
 				m.mu.Unlock()
 				return nil, errInvalidAccount
 			}
@@ -244,25 +250,32 @@ func (m *Manager) acquire(ctx context.Context, account Account) (func(), error) 
 			return nil, ErrAccountCapacity
 		}
 		for _, active := range m.accounts {
-			if active.account.Identity.Address == account.Identity.Address || fold(active.account.Nick) == fold(account.Nick) {
+			if sharedIdentity(active.account, account) || fold(active.account.Nick) == fold(account.Nick) {
 				m.mu.Unlock()
 				return nil, errInvalidAccount
 			}
 		}
-		local, err := restoreIdentity(account.Identity)
+		destinations, err := restoreDestinations(account)
 		if err != nil {
 			m.mu.Unlock()
 			return nil, err
 		}
 		if err := m.admissionErrorLocked(ctx); err != nil {
-			local.ReleaseSensitive()
+			for i := range destinations {
+				destinations[i].local.ReleaseSensitive()
+			}
 			m.mu.Unlock()
 			return nil, err
 		}
 		account.Identity.Keys = nil
+		alternates := make([]Identity, len(account.Alternates))
+		for i, identity := range account.Alternates {
+			alternates[i].Address = identity.Address
+		}
+		account.Alternates = alternates
 		account.Email = ""
 		lifetime, cancel := context.WithCancel(m.ctx)
-		state := &accountConnection{account: account, local: local, ctx: lifetime, cancel: cancel, done: make(chan struct{}), joined: make(map[string]bool), unavailable: make(map[string]bool)}
+		state := &accountConnection{account: account, destinations: destinations, ctx: lifetime, cancel: cancel, done: make(chan struct{}), joined: make(map[string]bool), unavailable: make(map[string]bool)}
 		m.accounts[account.ID] = state
 		release := m.leaseLocked(state)
 		m.accountWG.Go(func() { m.runAccount(state) })
@@ -346,17 +359,14 @@ func (m *Manager) stopAccountLocked(state *accountConnection) {
 	state.cancel()
 }
 
-func (m *Manager) finishAccount(state *accountConnection, endpoint ivnp.DestinationEndpoint) {
+func (m *Manager) finishAccount(state *accountConnection) {
 	m.mu.Lock()
 	m.stopAccountLocked(state)
 	m.mu.Unlock()
-	if endpoint != nil {
-		if err := endpoint.Close(); err != nil {
-			event := log.Warn().Int64("account_id", state.account.ID)
-			event.Err(err).Msg("I2P endpoint cleanup failed")
-		}
+	for i := range state.destinations {
+		m.closeAccountDestination(state, &state.destinations[i])
+		state.destinations[i].local.ReleaseSensitive()
 	}
-	state.local.ReleaseSensitive()
 	state.mu.Lock()
 	state.connection = nil
 	clear(state.joined)
@@ -365,7 +375,7 @@ func (m *Manager) finishAccount(state *accountConnection, endpoint ivnp.Destinat
 	// Emit before removing the slot so a replacement cannot publish status first.
 	m.status(state.account.ID, "stopped", "IRC account connection stopped")
 	m.mu.Lock()
-	state.account.Password = ""
+	state.account.ReleaseSensitive()
 	if m.accounts[state.account.ID] == state {
 		delete(m.accounts, state.account.ID)
 	}
@@ -374,41 +384,49 @@ func (m *Manager) finishAccount(state *accountConnection, endpoint ivnp.Destinat
 }
 
 func (m *Manager) runAccount(state *accountConnection) {
-	var endpoint ivnp.DestinationEndpoint
-	endpointReady := false
-	defer func() { m.finishAccount(state, endpoint) }()
+	defer m.finishAccount(state)
 	m.status(state.account.ID, "connecting", "Waiting for embedded I2P router")
 	select {
 	case <-state.ctx.Done():
 		return
 	case <-m.ready:
 	}
+	// Creation starts tunnel maintenance for every slot, without opening IRC sockets.
+	for i := range state.destinations {
+		if state.ctx.Err() != nil {
+			return
+		}
+		slot := &state.destinations[i]
+		slot.creationErr = m.createAccountDestination(state, slot)
+	}
+	selected := 0
 	for state.ctx.Err() == nil {
-		var err error
+		slot := &state.destinations[selected]
+		err := slot.creationErr
+		slot.creationErr = nil
 		stage := "destination creation"
-		if endpoint == nil {
-			m.status(state.account.ID, "connecting", "Creating I2P destination")
-			endpoint, err = m.createDestination(state.ctx, ivnp.DestinationSpec{Local: state.local})
+		if slot.endpoint == nil && err == nil {
+			err = m.createAccountDestination(state, slot)
 		}
 		// Renewal can reset publication readiness while existing tunnels remain usable.
-		if err == nil && !endpointReady {
+		if err == nil && !slot.ready {
 			stage = "destination readiness"
 			m.status(state.account.ID, "connecting", "Waiting for I2P destination tunnels")
-			if ready, ok := endpoint.(ivnp.ReadyDestinationEndpoint); ok {
+			if ready, ok := slot.endpoint.(ivnp.ReadyDestinationEndpoint); ok {
 				readyCtx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
 				err = ready.WaitReady(readyCtx)
 				cancel()
 			} else {
 				err = errNoReadiness
 			}
-			endpointReady = err == nil
+			slot.ready = err == nil
 		}
 		if err == nil {
 			stage = "IRC dial"
 			m.status(state.account.ID, "connecting", "Connecting to IRC over I2P")
 			dialCtx, dialCancel := context.WithTimeout(state.ctx, 2*time.Minute)
 			var conn net.Conn
-			conn, err = m.dialIRC(dialCtx, endpoint)
+			conn, err = m.dialIRC(dialCtx, slot.endpoint)
 			dialCancel()
 			if err == nil {
 				stage = "IRC session"
@@ -418,26 +436,19 @@ func (m *Manager) runAccount(state *accountConnection) {
 		if state.ctx.Err() != nil {
 			return
 		}
-		if state.account.ID != 0 && errors.Is(err, errNoReadiness) {
-			m.status(state.account.ID, "error", err.Error())
-			return
-		}
 		closedEndpoint := errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
 		staleRoute := errors.Is(err, dataplane.TunnelErrCircuitNotFound) || errors.Is(err, dataplane.TunnelErrCircuitExpired)
 		replaceEndpoint := errors.Is(err, errNoReadiness) || staleRoute || (stage != "IRC session" && closedEndpoint)
-		if endpoint != nil && replaceEndpoint {
-			if closeErr := endpoint.Close(); closeErr != nil {
-				event := log.Warn().Int64("account_id", state.account.ID)
-				event.Err(closeErr).Msg("I2P endpoint cleanup failed")
-			}
-			endpoint = nil
-			endpointReady = false
+		if replaceEndpoint {
+			m.closeAccountDestination(state, slot)
 		}
 		event := log.Warn().Int64("account_id", state.account.ID)
-		event.Str("server", m.cfg.Server).Str("stage", stage)
+		event.Str("server", m.cfg.Server).Str("stage", stage).Int("destination_slot", selected)
+		event.Str("destination", state.account.identityAt(selected).Address)
 		event.Err(err).Dur("retry_in_ms", reconnectDelay)
 		event.Msg("IRC connection attempt failed")
 		m.onEvent(Event{AccountID: state.account.ID, State: "disconnected", Text: fmt.Sprintf("IRC connection failed during %s: %v; retrying in %s without replaying messages", stage, err, reconnectDelay), Service: true, Kind: "status"})
+		selected = (selected + 1) % len(state.destinations)
 		if !pause(state.ctx, reconnectDelay) {
 			return
 		}

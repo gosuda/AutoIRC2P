@@ -47,6 +47,61 @@ func (q *Queries) AddMessage(ctx context.Context, arg AddMessageParams) (Message
 	return i, err
 }
 
+const backupObserverIdentityPool = `-- name: BackupObserverIdentityPool :one
+SELECT identity_pool FROM observer WHERE id = 1
+`
+
+func (q *Queries) BackupObserverIdentityPool(ctx context.Context) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, backupObserverIdentityPool)
+	var identity_pool []byte
+	err := row.Scan(&identity_pool)
+	return identity_pool, err
+}
+
+const backupObserverSecrets = `-- name: BackupObserverSecrets :one
+SELECT identity_keys FROM observer WHERE id = 1
+`
+
+func (q *Queries) BackupObserverSecrets(ctx context.Context) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, backupObserverSecrets)
+	var identity_keys []byte
+	err := row.Scan(&identity_keys)
+	return identity_keys, err
+}
+
+const backupUserIdentityPools = `-- name: BackupUserIdentityPools :many
+SELECT id,email,identity_pool FROM users WHERE id > ? ORDER BY id LIMIT 100
+`
+
+type BackupUserIdentityPoolsRow struct {
+	ID           int64  `json:"id"`
+	Email        string `json:"email"`
+	IdentityPool []byte `json:"identity_pool"`
+}
+
+func (q *Queries) BackupUserIdentityPools(ctx context.Context, id int64) ([]BackupUserIdentityPoolsRow, error) {
+	rows, err := q.db.QueryContext(ctx, backupUserIdentityPools, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BackupUserIdentityPoolsRow{}
+	for rows.Next() {
+		var i BackupUserIdentityPoolsRow
+		if err := rows.Scan(&i.ID, &i.Email, &i.IdentityPool); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const backupUserSecrets = `-- name: BackupUserSecrets :many
 SELECT id,email,irc_password,identity_keys FROM users WHERE id > ? ORDER BY id LIMIT 100
 `
@@ -189,7 +244,7 @@ func (q *Queries) ConsumeEcho(ctx context.Context, arg ConsumeEchoParams) (SendR
 }
 
 const createObserver = `-- name: CreateObserver :exec
-INSERT INTO observer (id,nick,identity_keys,identity_address) VALUES (1,?,?,?)
+INSERT INTO observer (id,nick,identity_keys,identity_address) VALUES (1,?,?,?) ON CONFLICT(id) DO NOTHING
 `
 
 type CreateObserverParams struct {
@@ -219,7 +274,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 }
 
 const createUser = `-- name: CreateUser :one
-INSERT INTO users (email,nick,password_salt,password_hash,irc_password,identity_keys,identity_address,created_at) VALUES (?,?,?,?,?,?,?,?) RETURNING id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, irc_registered, created_at
+INSERT INTO users (email,nick,password_salt,password_hash,irc_password,identity_keys,identity_address,created_at) VALUES (?,?,?,?,?,?,?,?) RETURNING id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, identity_pool, irc_registered, created_at
 `
 
 type CreateUserParams struct {
@@ -254,6 +309,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.IrcPassword,
 		&i.IdentityKeys,
 		&i.IdentityAddress,
+		&i.IdentityPool,
 		&i.IrcRegistered,
 		&i.CreatedAt,
 	)
@@ -361,7 +417,7 @@ func (q *Queries) FinishSend(ctx context.Context, arg FinishSendParams) (SendReq
 }
 
 const getObserver = `-- name: GetObserver :one
-SELECT id, nick, identity_keys, identity_address FROM observer WHERE id = 1
+SELECT id, nick, identity_keys, identity_address, identity_pool FROM observer WHERE id = 1
 `
 
 func (q *Queries) GetObserver(ctx context.Context) (Observer, error) {
@@ -372,6 +428,7 @@ func (q *Queries) GetObserver(ctx context.Context) (Observer, error) {
 		&i.Nick,
 		&i.IdentityKeys,
 		&i.IdentityAddress,
+		&i.IdentityPool,
 	)
 	return i, err
 }
@@ -406,6 +463,33 @@ func (q *Queries) GetSend(ctx context.Context, arg GetSendParams) (SendRequest, 
 		&i.PayloadPurged,
 	)
 	return i, err
+}
+
+const initializeObserverIdentityPool = `-- name: InitializeObserverIdentityPool :one
+UPDATE observer SET identity_pool = CASE WHEN length(identity_pool) = 0 THEN ?1 ELSE identity_pool END WHERE id = 1 RETURNING identity_pool
+`
+
+func (q *Queries) InitializeObserverIdentityPool(ctx context.Context, identityPool []byte) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, initializeObserverIdentityPool, identityPool)
+	var identity_pool []byte
+	err := row.Scan(&identity_pool)
+	return identity_pool, err
+}
+
+const initializeUserIdentityPool = `-- name: InitializeUserIdentityPool :one
+UPDATE users SET identity_pool = CASE WHEN length(identity_pool) = 0 THEN ?1 ELSE identity_pool END WHERE id = ?2 RETURNING identity_pool
+`
+
+type InitializeUserIdentityPoolParams struct {
+	IdentityPool []byte `json:"identity_pool"`
+	ID           int64  `json:"id"`
+}
+
+func (q *Queries) InitializeUserIdentityPool(ctx context.Context, arg InitializeUserIdentityPoolParams) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, initializeUserIdentityPool, arg.IdentityPool, arg.ID)
+	var identity_pool []byte
+	err := row.Scan(&identity_pool)
+	return identity_pool, err
 }
 
 const latestRoomMessage = `-- name: LatestRoomMessage :one
@@ -681,7 +765,7 @@ func (q *Queries) SaveTranslation(ctx context.Context, arg SaveTranslationParams
 }
 
 const sessionUser = `-- name: SessionUser :one
-SELECT users.id, users.email, users.nick, users.password_salt, users.password_hash, users.irc_password, users.identity_keys, users.identity_address, users.irc_registered, users.created_at FROM users JOIN sessions ON users.id = sessions.user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?
+SELECT users.id, users.email, users.nick, users.password_salt, users.password_hash, users.irc_password, users.identity_keys, users.identity_address, users.identity_pool, users.irc_registered, users.created_at FROM users JOIN sessions ON users.id = sessions.user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?
 `
 
 type SessionUserParams struct {
@@ -701,6 +785,7 @@ func (q *Queries) SessionUser(ctx context.Context, arg SessionUserParams) (User,
 		&i.IrcPassword,
 		&i.IdentityKeys,
 		&i.IdentityAddress,
+		&i.IdentityPool,
 		&i.IrcRegistered,
 		&i.CreatedAt,
 	)
@@ -725,7 +810,7 @@ func (q *Queries) UnreadMessages(ctx context.Context, arg UnreadMessagesParams) 
 }
 
 const userByEmail = `-- name: UserByEmail :one
-SELECT id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, irc_registered, created_at FROM users WHERE email = ?
+SELECT id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, identity_pool, irc_registered, created_at FROM users WHERE email = ?
 `
 
 func (q *Queries) UserByEmail(ctx context.Context, email string) (User, error) {
@@ -740,6 +825,7 @@ func (q *Queries) UserByEmail(ctx context.Context, email string) (User, error) {
 		&i.IrcPassword,
 		&i.IdentityKeys,
 		&i.IdentityAddress,
+		&i.IdentityPool,
 		&i.IrcRegistered,
 		&i.CreatedAt,
 	)
@@ -747,7 +833,7 @@ func (q *Queries) UserByEmail(ctx context.Context, email string) (User, error) {
 }
 
 const userByID = `-- name: UserByID :one
-SELECT id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, irc_registered, created_at FROM users WHERE id = ?
+SELECT id, email, nick, password_salt, password_hash, irc_password, identity_keys, identity_address, identity_pool, irc_registered, created_at FROM users WHERE id = ?
 `
 
 func (q *Queries) UserByID(ctx context.Context, id int64) (User, error) {
@@ -762,8 +848,20 @@ func (q *Queries) UserByID(ctx context.Context, id int64) (User, error) {
 		&i.IrcPassword,
 		&i.IdentityKeys,
 		&i.IdentityAddress,
+		&i.IdentityPool,
 		&i.IrcRegistered,
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const userIdentityPool = `-- name: UserIdentityPool :one
+SELECT identity_pool FROM users WHERE id = ?
+`
+
+func (q *Queries) UserIdentityPool(ctx context.Context, id int64) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, userIdentityPool, id)
+	var identity_pool []byte
+	err := row.Scan(&identity_pool)
+	return identity_pool, err
 }
