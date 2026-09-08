@@ -52,9 +52,12 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
-	translator, err := translate.New(translate.Config{BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Models: cfg.Models, Interval: cfg.Interval, Cooldown: cfg.Cooldown, FailureThreshold: 3}, &http.Client{Timeout: 60 * time.Second}, queries)
-	if err != nil {
-		return err
+	var translator server.Translator
+	if cfg.TranslationEnabled {
+		translator, err = translate.New(translate.Config{BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Models: cfg.Models, Interval: cfg.Interval, Cooldown: cfg.Cooldown, FailureThreshold: 3}, &http.Client{Timeout: 60 * time.Second}, queries)
+		if err != nil {
+			return err
+		}
 	}
 	var app *server.Server
 	bridge, err := irc.New(irc.Config{ConfigPath: cfg.IVNPConfig, Server: cfg.IRCServer, Rooms: cfg.Rooms, IdleTimeout: cfg.IRCIdleTimeout, PongTimeout: cfg.IRCPongTimeout, MaxAccounts: cfg.IRCMaxAccounts, AccountIdleGrace: cfg.IRCAccountIdleGrace}, func(event irc.Event) { app.Event(ctx, event) })

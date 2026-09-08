@@ -19,13 +19,15 @@ From the cloned repository, with `OPENAI_API_KEY` exported in your shell, run th
 
 Run `docker logs -f autoirc2p` and open a ready HTTPS URL. The command uses Google's API; change `OPENAI_BASE_URL` and pass `OPENAI_MODEL_0`/`OPENAI_MODEL_1` for another provider. The key is forwarded from your environment rather than included in the command arguments.
 
+For original-only chat, omit the leading API-key check and the two `OPENAI_*` flags, and add `--env TRANSLATION_ENABLED=0`. No translation endpoint or API key is needed.
+
 The image builds and includes the frontend at `/web/build`. If you override `WEB_DIR`, use `/web/build` or `web/build` (the container working directory is `/`). Mount persistent data at `/data`, not over the bundled frontend.
 
 This is an alternative to Compose, with its own `autoirc2p-data` volume. To rebuild, first run `docker stop autoirc2p && docker rm autoirc2p`, then repeat the command; the volume preserves your data and Portalite identity. Do not run it alongside an existing deployment when migrating the same accounts.
 
 ## Quick start with Docker Compose
 
-You need Docker Engine with Compose v2 and an OpenAI-compatible API key. The example uses Google's API and Gemma models.
+You need Docker Engine with Compose v2. Translation additionally requires an OpenAI-compatible API key; the example uses Google's API and Gemma models.
 
 ### 1. Get the app
 
@@ -40,7 +42,7 @@ Already installed? Keep your existing `.env` and data instead of copying over th
 
 ### 2. Choose how to connect
 
-Set `OPENAI_API_KEY` in `.env`, then choose **one** mode.
+Set `OPENAI_API_KEY` in `.env`, or set `TRANSLATION_ENABLED=0` for original-only chat without a translation provider. Then choose **one** mode.
 
 **Your own domain (default)**
 
@@ -78,7 +80,11 @@ Open `https://chat.example.org` in domain mode, or a ready HTTPS URL printed in 
 
 The first I2P connection can take several minutes. **Live feed** means your browser is connected; **I2P network** shows whether IRC is connected. Guests can read; create an account to send messages.
 
+**Preparing to send** means the browser/history or IRC channel membership is not ready, not that translation is pending. Both your account and the shared reader must join the channel before sending; check **Connection details** for IRC failures. Disabling translation does not bypass these delivery checks.
+
 Rooms appear in a vertically scrollable list from startup, ordered by the latest message. New activity reorders the list without switching your open conversation.
+
+`TRANSLATION_ENABLED=0` removes translation controls and background translation work. History, live messages, and outgoing messages remain original-only even if a browser saved Auto-translate as On. Provider settings are ignored; interface language selection remains available. Restart the app and reload open browser tabs after changing this setting. The default is `1`.
 
 **Auto-translate** defaults to **Off**. Off displays and sends original text. On translates incoming messages into your selected reading language and outgoing messages into the fixed target below. **Send original** bypasses translation for one message. The setting is saved separately for guests and each account.
 
@@ -115,6 +121,7 @@ Edit `.env`, then run the start command again.
 | Setting | Use |
 | --- | --- |
 | `IRC_ROOMS='#i2p,#i2p-chat,#ko'` | Channels to join; keep the whole value quoted so `#` is preserved. |
+| `TRANSLATION_ENABLED=0` | Disable translation UI, provider initialization, and incoming/outgoing translation. No API key or endpoint required. Default: `1`. |
 | `OPENAI_BASE_URL`, `OPENAI_MODEL_0`, `OPENAI_MODEL_1` | Choose your translation provider and models. |
 | `TRANSLATION_INTERVAL=5s` | Increase this if you hit your provider's quota. |
 | `IRC_OBSERVER_NICK`, `IRC_OBSERVER_PASSWORD` | Optional NickServ credentials for the shared reader; set both or neither. |
@@ -153,7 +160,7 @@ History is retained for 30 days by default. More settings are listed in [.env.ex
 
 ## Run without Docker
 
-Requires Go 1.27 and Bun. Create `.env` from the example and set your API key, then:
+Requires Go 1.27 and Bun. Create `.env` from the example and set your API key or `TRANSLATION_ENABLED=0`, then:
 
 ```sh
 cd web

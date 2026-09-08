@@ -7,7 +7,8 @@ services:
     env_file: .env
     environment:
       LISTEN_ADDR: 0.0.0.0:8080
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      TRANSLATION_ENABLED: ${TRANSLATION_ENABLED:-1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       APP_ORIGIN: https://${PUBLIC_HOST:?Set PUBLIC_HOST to your public hostname in .env}
       DATA_DIR: /data
       WEB_DIR: /web/build

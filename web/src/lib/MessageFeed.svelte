@@ -3,8 +3,9 @@
   import { messageKey, type Language, type Message, type Outgoing } from './api';
   import { copy, languageName } from './i18n';
 
-  let { language, autoTranslate, roomName, messages, outgoing, loading, error, sendsError, checking, onread, onretry, oncheck, onrestore }: {
+  let { language, translationEnabled, autoTranslate, roomName, messages, outgoing, loading, error, sendsError, checking, onread, onretry, oncheck, onrestore }: {
     language: Language;
+    translationEnabled: boolean;
     autoTranslate: boolean;
     roomName: string;
     messages: Message[];
@@ -184,7 +185,7 @@
           {#if !autoTranslate || send.state === 'translating'}<p class="message-original" dir="auto">{send.original}</p>{/if}
           {#if send.state !== 'confirmed'}
             <div class="outgoing-status" role="status">
-              {#if send.state === 'translating'}{text.translating}
+              {#if send.state === 'translating'}{translationEnabled ? text.translating : text.sending}
               {:else if send.state === 'sending' || send.state === 'awaiting_echo'}{text.awaitingEcho}
               {:else if send.state === 'failed'}{text.sendFailed}
               {:else}{text.unconfirmed}{/if}

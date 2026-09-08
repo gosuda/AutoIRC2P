@@ -25,6 +25,7 @@ export type Session = {
   rooms: Room[];
   network: Network;
   displayLanguage: Language;
+  translationEnabled: boolean;
 };
 export type Message = {
   id: number;

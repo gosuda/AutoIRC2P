@@ -23,6 +23,7 @@ type Config struct {
 	HTTPBodyTimeout, HTTPWriteTimeout, IRCAccountIdleGrace                  time.Duration
 	IRCMaxAccounts                                                          int
 	SecureCookies, Offline                                                  bool
+	TranslationEnabled                                                      bool
 	Portalite                                                               bool
 	PortaliteName                                                           string
 	PortaliteRelays                                                         []string
@@ -72,7 +73,14 @@ func env(key, fallback string) string {
 const defaultRooms = "#i2p,#i2p-chat,#saltr,#i2p-dev,#i2pd-dev,#i2pd,#ru,#scanners,#i2p-news,#i2c2p,#salt,#freedom,#i2pd-ru,#go-i2p-dev,#i2people,#ko,#ivnp-dev,#ivnp,#dev,#i2p-design,#i2p-de,#go-i2p"
 
 func Load() (Config, error) {
-	cfg := Config{Listen: env("LISTEN_ADDR", "127.0.0.1:8080"), Origin: env("APP_ORIGIN", "http://localhost:8080"), DataDir: env("DATA_DIR", "data"), WebDir: env("WEB_DIR", "web/build"), IVNPConfig: env("IVNP_CONFIG", "data/ivnp.conf"), IRCServer: env("IRC_SERVER", "irc.postman.i2p:6667"), BaseURL: os.Getenv("OPENAI_BASE_URL"), APIKey: os.Getenv("OPENAI_API_KEY"), Models: []string{env("OPENAI_MODEL_0", "gemma-4-31b-it"), env("OPENAI_MODEL_1", "gemma-4-26b-a4b-it")}, Rooms: strings.Split(env("IRC_ROOMS", defaultRooms), ","), Offline: os.Getenv("IRC_OFFLINE") == "1"}
+	cfg := Config{Listen: env("LISTEN_ADDR", "127.0.0.1:8080"), Origin: env("APP_ORIGIN", "http://localhost:8080"), DataDir: env("DATA_DIR", "data"), WebDir: env("WEB_DIR", "web/build"), IVNPConfig: env("IVNP_CONFIG", "data/ivnp.conf"), IRCServer: env("IRC_SERVER", "irc.postman.i2p:6667"), Rooms: strings.Split(env("IRC_ROOMS", defaultRooms), ","), Offline: os.Getenv("IRC_OFFLINE") == "1"}
+	switch os.Getenv("TRANSLATION_ENABLED") {
+	case "", "1":
+		cfg.TranslationEnabled = true
+	case "0":
+	default:
+		return cfg, fmt.Errorf("TRANSLATION_ENABLED must be 0 or 1")
+	}
 	if err := cfg.loadPortalite(); err != nil {
 		return cfg, err
 	}
@@ -107,13 +115,18 @@ func Load() (Config, error) {
 		}
 		cfg.Rooms[i] = room
 	}
-	cfg.Interval, err = time.ParseDuration(env("TRANSLATION_INTERVAL", "5s"))
-	if err != nil || cfg.Interval <= 0 {
-		return cfg, fmt.Errorf("TRANSLATION_INTERVAL must be positive duration")
-	}
-	cfg.Cooldown, err = time.ParseDuration(env("TRANSLATION_COOLDOWN", "60s"))
-	if err != nil || cfg.Cooldown <= 0 {
-		return cfg, fmt.Errorf("TRANSLATION_COOLDOWN must be positive duration")
+	if cfg.TranslationEnabled {
+		cfg.BaseURL = os.Getenv("OPENAI_BASE_URL")
+		cfg.APIKey = os.Getenv("OPENAI_API_KEY")
+		cfg.Models = []string{env("OPENAI_MODEL_0", "gemma-4-31b-it"), env("OPENAI_MODEL_1", "gemma-4-26b-a4b-it")}
+		cfg.Interval, err = time.ParseDuration(env("TRANSLATION_INTERVAL", "5s"))
+		if err != nil || cfg.Interval <= 0 {
+			return cfg, fmt.Errorf("TRANSLATION_INTERVAL must be positive duration")
+		}
+		cfg.Cooldown, err = time.ParseDuration(env("TRANSLATION_COOLDOWN", "60s"))
+		if err != nil || cfg.Cooldown <= 0 {
+			return cfg, fmt.Errorf("TRANSLATION_COOLDOWN must be positive duration")
+		}
 	}
 	cfg.IRCIdleTimeout, err = time.ParseDuration(env("IRC_IDLE_TIMEOUT", "20m"))
 	if err != nil || cfg.IRCIdleTimeout <= 0 {

@@ -110,10 +110,16 @@ type Server struct {
 	outgoingMu    sync.Mutex
 }
 
+// New disables incoming and outgoing translation when tr is nil.
 func New(cfg Config, q *store.Queries, a *auth.Service, tr Translator, bridge Bridge) *Server {
 	cfg.Security = cfg.Security.normalized()
 	lifetime, cancel := context.WithCancel(context.Background())
-	return &Server{cfg: cfg, q: q, auth: a, translator: tr, bridge: bridge, subscribers: make(map[*subscription]struct{}), net: network{State: "connecting", Detail: "Building I2P tunnels"}, accountStates: make(map[int64]network), jobs: make(chan translationJob, 1024), queued: make(map[string]struct{}), events: make(chan irc.Event, 1024), lifetime: lifetime, cancel: cancel}
+	s := &Server{cfg: cfg, q: q, auth: a, translator: tr, bridge: bridge, subscribers: make(map[*subscription]struct{}), net: network{State: "connecting", Detail: "Building I2P tunnels"}, accountStates: make(map[int64]network), events: make(chan irc.Event, 1024), lifetime: lifetime, cancel: cancel}
+	if tr != nil {
+		s.jobs = make(chan translationJob, 1024)
+		s.queued = make(map[string]struct{})
+	}
+	return s
 }
 func (s *Server) Event(ctx context.Context, event irc.Event) {
 	select {
@@ -124,8 +130,10 @@ func (s *Server) Event(ctx context.Context, event irc.Event) {
 }
 func (s *Server) Run(ctx context.Context) {
 	var wg sync.WaitGroup
-	for range 4 {
-		wg.Go(func() { s.translateWorker(ctx) })
+	if s.translator != nil {
+		for range 4 {
+			wg.Go(func() { s.translateWorker(ctx) })
+		}
 	}
 	defer func() {
 		s.sendMu.Lock()
@@ -238,7 +246,11 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 	}
 	s.outgoingMu.Unlock()
 	s.refreshRooms(ctx, row.Room, 0)
-	for _, lang := range []string{"en", "ko", "original"} {
+	languages := []string{"original"}
+	if s.translator != nil {
+		languages = []string{"en", "ko", "original"}
+	}
+	for _, lang := range languages {
 		msg := messageFrom(row, lang)
 		s.broadcast(row.Room, lang, 0, frame{Type: "message", Message: &msg})
 		if msg.TranslationState == "pending" && s.hasReaders(row.Room, lang) {
@@ -352,8 +364,8 @@ func (s *Server) roomAllowed(room string) bool {
 	}
 	return false
 }
-func language(r *http.Request) string {
-	if r.URL.Query().Get("lang") == "original" {
+func (s *Server) language(r *http.Request) string {
+	if s.translator == nil || r.URL.Query().Get("lang") == "original" {
 		return "original"
 	}
 	if r.URL.Query().Get("lang") == "en" {

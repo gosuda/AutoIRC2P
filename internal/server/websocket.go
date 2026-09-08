@@ -67,7 +67,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "connection interrupted")
 		return
 	}
-	sub := &subscription{userID: userID, room: room, lang: language(r), out: make(chan frame, 256), done: make(chan struct{}), cursors: cursors}
+	sub := &subscription{userID: userID, room: room, lang: s.language(r), out: make(chan frame, 256), done: make(chan struct{}), cursors: cursors}
 	upgrader := websocket.Upgrader{CheckOrigin: s.sameOrigin, HandshakeTimeout: 10 * time.Second}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

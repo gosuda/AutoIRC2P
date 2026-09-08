@@ -3,8 +3,9 @@
   import type { Language, Room, User } from './api';
   import { copy, languageName } from './i18n';
 
-  let { language, autoTranslate, room, user, draft, ready, busy, error, onlogin, ondraft, onsend }: {
+  let { language, translationEnabled, autoTranslate, room, user, draft, ready, busy, error, onlogin, ondraft, onsend }: {
     language: Language;
+    translationEnabled: boolean;
     autoTranslate: boolean;
     room: Room;
     user: User | null;
@@ -62,7 +63,7 @@
   {#if user}
     <div class="composer-heading">
       <label for="message-input">{text.compose} <span class="composer-nick">@{user.nick}</span></label>
-      <span class="room-language" title={text.outgoingLanguage}>{languageName(room.language, language)}</span>
+      {#if translationEnabled}<span class="room-language" title={text.outgoingLanguage}>{languageName(room.language, language)}</span>{/if}
     </div>
     <textarea id="message-input" rows="2" value={draft} oninput={(event) => ondraft(event.currentTarget.value)} maxlength="4096" placeholder={`${room.name}…`} aria-invalid={invalidLine} aria-describedby="composer-help composer-error composer-readiness" onkeydown={(event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {

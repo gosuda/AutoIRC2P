@@ -164,13 +164,17 @@ func TestHTTPOnlyExplicitAuthenticatedSendReachesIRC(t *testing.T) {
 }
 
 func TestReaderLanguageControlsHistoryAndLiveTranslation(t *testing.T) {
-	cases := []struct{ lang, translation string }{
-		{"original", ""},
-		{"en", "Hello, everyone."},
-		{"ko", "안녕하세요 여러분."},
+	cases := []struct {
+		name, lang, translation string
+		disabled                bool
+	}{
+		{"original", "original", "", false},
+		{"en", "en", "Hello, everyone.", false},
+		{"ko", "ko", "안녕하세요 여러분.", false},
+		{"disabled with stale language", "en", "", true},
 	}
 	for _, tc := range cases {
-		t.Run(tc.lang, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
 			var calls atomic.Int64
 			app.translator = translationFunc(func(_ context.Context, text, target string) (string, error) {
@@ -180,6 +184,9 @@ func TestReaderLanguageControlsHistoryAndLiveTranslation(t *testing.T) {
 				}
 				return "Hello, everyone.", nil
 			})
+			if tc.disabled {
+				app.translator = nil
+			}
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan struct{})
 			go func() { defer close(done); app.Run(ctx) }()
@@ -203,7 +210,7 @@ func TestReaderLanguageControlsHistoryAndLiveTranslation(t *testing.T) {
 				t.Fatalf("history messages = %d, want 1", len(history.Messages))
 			}
 			state, target := "pending", tc.lang
-			if tc.lang == "original" {
+			if tc.lang == "original" || tc.disabled {
 				state, target = "excluded", ""
 			}
 			assertInitial := func(msg *Message) {
@@ -243,7 +250,7 @@ func TestReaderLanguageControlsHistoryAndLiveTranslation(t *testing.T) {
 				if event.Type == "message" {
 					assertInitial(event.Message)
 					liveID = event.Message.ID
-					if tc.lang == "original" {
+					if tc.lang == "original" || tc.disabled {
 						break
 					}
 				}
@@ -256,7 +263,7 @@ func TestReaderLanguageControlsHistoryAndLiveTranslation(t *testing.T) {
 			}
 			cancel()
 			<-done
-			if tc.lang == "original" && calls.Load() != 0 {
+			if (tc.lang == "original" || tc.disabled) && calls.Load() != 0 {
 				t.Fatalf("original-only reader invoked translator %d times", calls.Load())
 			}
 		})

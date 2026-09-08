@@ -7,7 +7,8 @@ services:
     env_file: .env
     environment:
       PORTALITE: "1"
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      TRANSLATION_ENABLED: ${TRANSLATION_ENABLED:-1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       APP_ORIGIN: ""
       DATA_DIR: /data
       WEB_DIR: /web/build

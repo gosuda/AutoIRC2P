@@ -187,7 +187,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseAccount()
 	target := ""
-	if !body.Original {
+	if s.translator != nil && !body.Original {
 		target = translate.RoomTargetLanguage(body.Room)
 	}
 	state := "sending"

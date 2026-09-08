@@ -7,7 +7,8 @@
   import { copy, languageName } from '$lib/i18n';
 
   let language = $state<Language>('en');
-  let autoTranslate = $state(false);
+  let translationEnabled = $state(false);
+  let autoTranslatePreference = $state(false);
   let user = $state<User | null>(null);
   let rooms = $state<Room[]>([]);
   let roomName = $state('');
@@ -43,6 +44,7 @@
   let preferencesKey = '';
   let locallySubmitted = new Set<string>();
   const text = $derived(copy[language]);
+  const autoTranslate = $derived(translationEnabled && autoTranslatePreference);
   const room = $derived(rooms.find((candidate) => candidate.name === roomName));
   const ready = $derived(!!user && subscription === 'live' && room?.readState === 'ready' && room?.sendState === 'ready' && !historyLoading && !historyError);
   const visibleOutgoing = $derived(Object.values(outgoing).filter((send) => send.room === roomName && (send.state === 'confirmed' || Date.parse(send.expiresAt) > now)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)));
@@ -83,7 +85,7 @@
         if (cursor > (merged[name] ?? 0)) { merged[name] = cursor; active?.read(name, cursor); }
       }
       cursors = merged;
-      localStorage.setItem(preferencesKey, JSON.stringify({ favorites, cursors, autoTranslate }));
+      localStorage.setItem(preferencesKey, JSON.stringify({ favorites, cursors, autoTranslate: autoTranslatePreference }));
       storageError = false;
     } catch { storageError = true; }
   }
@@ -112,12 +114,12 @@
     preferencesKey = `autoirc2p:rooms:v1:${next?.id ?? 'guest'}`;
     favorites = [];
     cursors = {};
-    autoTranslate = false;
+    autoTranslatePreference = false;
     try {
       const stored = storedPreferences(localStorage.getItem(preferencesKey));
       favorites = stored.favorites;
       cursors = stored.cursors;
-      autoTranslate = stored.autoTranslate;
+      autoTranslatePreference = stored.autoTranslate;
       storageError = false;
     } catch { storageError = true; }
     roomName = favorites[0] ?? rooms[0]?.name ?? '';
@@ -185,6 +187,7 @@
       if (signal.aborted) return;
       rooms = session.rooms;
       network = session.network;
+      translationEnabled = session.translationEnabled;
       switchAccount(session.user);
       const snapshot = await request<{ rooms: Room[] }>(`/api/rooms?${new URLSearchParams({ cursors: JSON.stringify(cursors) })}`, { signal });
       if (signal.aborted) return;
@@ -208,7 +211,7 @@
       try {
         const stored = storedPreferences(event.newValue);
         favorites = stored.favorites;
-        autoTranslate = stored.autoTranslate;
+        autoTranslatePreference = stored.autoTranslate;
         const merged = { ...cursors };
         for (const [name, cursor] of Object.entries(stored.cursors)) {
           if (cursor > (merged[name] ?? 0)) { merged[name] = cursor; active?.read(name, cursor); }
@@ -277,7 +280,7 @@
     if (!(error instanceof APIError)) return text.notSent;
     switch (error.code) {
       case 'not_ready': return text.preparing;
-      case 'translation_failed': return text.translationSendFailed;
+      case 'translation_failed': return translationEnabled ? text.translationSendFailed : text.notSent;
       case 'invalid_message': return text.messageInvalid;
       case 'request_conflict': return text.requestConflict;
       case 'login_required': return text.signInToSend;
@@ -374,7 +377,7 @@
 
 <svelte:head>
   <title>{roomName ? `${roomName} — ` : ''}AutoIRC2P</title>
-  <meta name="description" content="Conversations with translations and original messages side by side." />
+  <meta name="description" content={translationEnabled ? 'Conversations with translations and original messages side by side.' : 'Conversations across IRC rooms.'} />
 </svelte:head>
 
 <a class="skip-link" href="#conversation">{text.messages}</a>
@@ -393,7 +396,7 @@
           <div class="room-row" class:selected={candidate.name === roomName}>
             <button type="button" class="room-button" class:selected={candidate.name === roomName} aria-current={candidate.name === roomName ? 'page' : undefined} onclick={() => { roomName = candidate.name; }}>
               <span class="room-name">{candidate.name}</span>
-              {#if candidate.unreadCount > 0}<span class="unread-badge" aria-label={`${candidate.unreadCount} ${text.unread}`}>{candidate.unreadCount > 99 ? '99+' : candidate.unreadCount}</span>{:else}<span class="room-code" title={`${text.outgoingLanguage}: ${languageName(candidate.language, language)}`}>{candidate.language.toUpperCase()}</span>{/if}
+              {#if candidate.unreadCount > 0}<span class="unread-badge" aria-label={`${candidate.unreadCount} ${text.unread}`}>{candidate.unreadCount > 99 ? '99+' : candidate.unreadCount}</span>{:else if translationEnabled}<span class="room-code" title={`${text.outgoingLanguage}: ${languageName(candidate.language, language)}`}>{candidate.language.toUpperCase()}</span>{/if}
             </button>
             <button type="button" class="favorite-button" aria-pressed={favorites.includes(candidate.name)} aria-label={`${favorites.includes(candidate.name) ? text.removeFavorite : text.addFavorite}: ${candidate.name}`} onclick={() => toggleFavorite(candidate.name)}>
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2 2.5 5.1 5.6.8-4 3.9.9 5.5-5-2.6-5 2.6.9-5.5-4-3.9 5.6-.8Z" /></svg>
@@ -418,7 +421,7 @@
     <header class="workspace-header">
       <div class="room-heading"><span class="context-label">{text.selectedRoom}</span><h1>{roomName || 'AutoIRC2P'}</h1></div>
       <div class="header-controls">
-        <button type="button" class="account-button" role="switch" aria-checked={autoTranslate} aria-label={text.autoTranslate} onclick={() => { autoTranslate = !autoTranslate; persistPreferences(); }}>{text.autoTranslate} {autoTranslate ? 'On' : 'Off'}</button>
+        {#if translationEnabled}<button type="button" class="account-button" role="switch" aria-checked={autoTranslate} aria-label={text.autoTranslate} onclick={() => { autoTranslatePreference = !autoTranslatePreference; persistPreferences(); }}>{text.autoTranslate} {autoTranslate ? 'On' : 'Off'}</button>{/if}
         <label class="language-control"><span>{autoTranslate ? text.displayLanguage : text.interfaceLanguage}</span><select bind:value={language} aria-label={autoTranslate ? text.displayLanguage : text.interfaceLanguage}><option value="en">English</option><option value="ko">한국어</option></select></label>
         {#if user}<button type="button" class="account-button" disabled={loggingOut} onclick={() => void logout()} title={`@${user.nick} · ${text.logout}`}><span class="account-nick">@{user.nick}</span><span>{loggingOut ? text.working : text.logout}</span></button>
         {:else}<button type="button" class="account-button" onclick={() => { authMode = 'login'; }}>{text.login}</button>{/if}
@@ -426,7 +429,7 @@
     </header>
     <div class="conversation-status" aria-live="polite">
       <span class="feed-status"><span class="status-dot" class:ready={ready || (!user && subscription === 'live' && room?.readState === 'ready')} aria-hidden="true"></span>{connectionLabel}</span>
-      {#if room}<span>{text.outgoingLanguage} <strong>{languageName(room.language, language)}</strong></span>{/if}
+      {#if translationEnabled && room}<span>{text.outgoingLanguage} <strong>{languageName(room.language, language)}</strong></span>{/if}
       {#if subscription === 'reconnecting' || room?.sendState === 'unavailable' || room?.readState === 'unavailable'}<button type="button" class="text-button connection-retry" disabled={restoring} onclick={() => void restoreSession()}>{text.retry}</button>{/if}
       <span class="read-mode">{user ? `@${user.nick}` : text.guest}</span>
     </div>
@@ -436,10 +439,10 @@
       <div class="workspace-loading" role="status"><span class="empty-mark" aria-hidden="true">a/</span><p>{restoring ? text.initializing : text.sessionError}</p></div>
     {:else if room}
       {#key `${roomName}:${language}:${user?.id ?? 'guest'}`}
-        <MessageFeed {language} {autoTranslate} {roomName} {messages} outgoing={visibleOutgoing} loading={historyLoading} error={historyError} {sendsError} {checking} onread={markRead} onretry={() => active?.refresh()} oncheck={(send) => void checkSend(send)} onrestore={(send) => { drafts = { ...drafts, [send.room]: send.original }; }} />
+        <MessageFeed {language} {translationEnabled} {autoTranslate} {roomName} {messages} outgoing={visibleOutgoing} loading={historyLoading} error={historyError} {sendsError} {checking} onread={markRead} onretry={() => active?.refresh()} oncheck={(send) => void checkSend(send)} onrestore={(send) => { drafts = { ...drafts, [send.room]: send.original }; }} />
       {/key}
       {#key `${roomName}:${user?.id ?? 'guest'}`}
-        <Composer {language} {autoTranslate} {room} {user} {draft} {ready} {busy} error={composeError} onlogin={() => { authMode = 'login'; }} ondraft={(value) => { drafts = { ...drafts, [roomName]: value }; }} onsend={(original) => void sendMessage(original)} />
+        <Composer {language} {translationEnabled} {autoTranslate} {room} {user} {draft} {ready} {busy} error={composeError} onlogin={() => { authMode = 'login'; }} ondraft={(value) => { drafts = { ...drafts, [roomName]: value }; }} onsend={(original) => void sendMessage(original)} />
       {/key}
     {:else}<div class="workspace-loading"><p>{text.noRooms}</p></div>{/if}
   </main>

@@ -55,7 +55,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(strings.ToLower(r.Header.Get("Accept-Language")), "en") {
 		lang = "en"
 	}
-	writeJSON(w, 200, map[string]any{"user": user, "rooms": rooms, "network": status, "displayLanguage": lang})
+	writeJSON(w, 200, map[string]any{"user": user, "rooms": rooms, "network": status, "displayLanguage": lang, "translationEnabled": s.translator != nil})
 }
 func (s *Server) salt(w http.ResponseWriter, r *http.Request) {
 	email := r.URL.Query().Get("email")
@@ -146,7 +146,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	messages := make([]Message, 0, len(rows))
-	lang := language(r)
+	lang := s.language(r)
 	viewer, _ := s.currentUser(r)
 	for i := len(rows) - 1; i >= 0; i-- {
 		msg := messageFrom(rows[i], lang)

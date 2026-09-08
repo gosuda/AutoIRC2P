@@ -198,6 +198,34 @@ func TestTranslatedSendInTargetLanguageDoesNotBypassProviderFailure(t *testing.T
 	}
 }
 
+func TestDisabledTranslationSendsOriginalForStaleClient(t *testing.T) {
+	bridge := &lifecycleBridge{state: irc.RoomReady}
+	app, user, token := lifecycleServer(t, bridge)
+	app.translator = nil
+	sends := 0
+	bridge.send = func(ctx context.Context, _ int64, room, text string) error {
+		sends++
+		if text != "번역 없이 보내는 메시지" {
+			t.Fatalf("wire text = %q, want unchanged original", text)
+		}
+		app.receive(ctx, irc.Event{Kind: "message", Room: room, Nick: user.Nick, Text: text})
+		return nil
+	}
+	response, outgoing := postOutgoing(t, app, token, "번역 없이 보내는 메시지", "disabled_translation_01", false)
+	if response.Code != http.StatusOK || outgoing.State != "confirmed" {
+		t.Fatalf("original send without provider: %d %s", response.Code, response.Body.String())
+	}
+	response, repeated := postOutgoing(t, app, token, "번역 없이 보내는 메시지", "disabled_translation_01", false)
+	if response.Code != http.StatusOK || repeated.MessageID != outgoing.MessageID || sends != 1 {
+		t.Fatalf("duplicate original send: status=%d send=%+v wire sends=%d", response.Code, repeated, sends)
+	}
+	bridge.state = irc.RoomPreparing
+	response, _ = postOutgoing(t, app, token, "아직 입장하지 않은 채널", "disabled_not_ready_01", false)
+	if response.Code != http.StatusConflict || sends != 1 {
+		t.Fatalf("unready original send: status=%d wire sends=%d", response.Code, sends)
+	}
+}
+
 func TestReadCursorCountsMessagesAndNeverMovesBackward(t *testing.T) {
 	app, user, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
 	add := func(room string, sender, service int64) int64 {
