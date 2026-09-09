@@ -80,7 +80,13 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	status := s.networkStatusLocked(sub.userID)
 	sub.push(frame{Type: "status", State: status.State, Detail: status.Detail})
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.subscribers, sub); s.mu.Unlock(); sub.close() }()
+	defer func() {
+		s.mu.Lock()
+		delete(s.subscribers, sub)
+		s.forgetStoppedAccountLocked(sub.userID)
+		s.mu.Unlock()
+		sub.close()
+	}()
 	rooms, roomErr := s.allRooms(ctx, sub.userID, sub.cursors)
 	if roomErr == nil {
 		sub.push(frame{Type: "rooms", Rooms: rooms})

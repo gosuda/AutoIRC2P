@@ -324,6 +324,45 @@ func TestNicknameAuthenticationDoesNotDiscloseInternalEmail(t *testing.T) {
 	}
 }
 
+func TestLoginWaitsForIRCStartupInsteadOfReportingStopped(t *testing.T) {
+	app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomPreparing})
+	app.receive(t.Context(), irc.Event{Kind: "status", State: "connected", Text: "observer connection"})
+	handler := app.Handler()
+	login := httptest.NewRequest(http.MethodPost, "https://chat.example/api/auth/login", strings.NewReader(`{"nick":"alice","passwordHash":"`+strings.Repeat("ab", 32)+`"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("Origin", "https://chat.example")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, login)
+	if response.Code != http.StatusOK {
+		t.Fatalf("login status=%d: %s", response.Code, response.Body.String())
+	}
+	session := httptest.NewRequest(http.MethodGet, "https://chat.example/api/session", nil)
+	for _, cookie := range (&http.Response{Header: response.Header()}).Cookies() {
+		session.AddCookie(cookie)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, session)
+	var result struct {
+		User    *auth.User
+		Network network
+		Rooms   []Room
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || result.User == nil || result.User.Nick != "alice" {
+		t.Fatalf("session after login: %d %s", response.Code, response.Body.String())
+	}
+	if result.Network.State != "connecting" {
+		t.Fatalf("login before IRC startup = %+v, want connecting", result.Network)
+	}
+	for _, room := range result.Rooms {
+		if room.SendState != "preparing" {
+			t.Fatalf("unjoined room %q became %s after login", room.Name, room.SendState)
+		}
+	}
+}
+
 func TestAuthenticationRejectsEmailCredentials(t *testing.T) {
 	app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
 	for _, path := range []string{"/api/auth/register", "/api/auth/login"} {

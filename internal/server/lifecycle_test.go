@@ -283,7 +283,11 @@ func TestReadCursorCountsMessagesAndNeverMovesBackward(t *testing.T) {
 }
 
 func TestAccountNetworkStatusStaysIndependentAcrossReconnects(t *testing.T) {
-	app, user, token := lifecycleServer(t, &lifecycleBridge{state: irc.RoomPreparing})
+	released := make(chan struct{}, 8)
+	bridge := &leaseBridge{lifecycleBridge: &lifecycleBridge{state: irc.RoomPreparing}, acquire: func(context.Context, irc.Account) (func(), error) {
+		return func() { released <- struct{}{} }, nil
+	}}
+	app, user, token := lifecycleServer(t, bridge)
 	app.receive(t.Context(), irc.Event{Kind: "status", State: "connected", Text: "observer connection"})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -343,6 +347,7 @@ func TestAccountNetworkStatusStaysIndependentAcrossReconnects(t *testing.T) {
 			return
 		}
 	}
+	var closeAccounts []func()
 	connect := func(authenticated bool, want string) *websocket.Conn {
 		t.Helper()
 		header := http.Header{"Origin": {"https://chat.example"}}
@@ -353,11 +358,20 @@ func TestAccountNetworkStatusStaysIndependentAcrossReconnects(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() {
+		closed := false
+		closeConnection := func() {
+			if closed {
+				return
+			}
+			closed = true
 			if err := conn.Close(); err != nil {
 				t.Error(err)
 			}
-		})
+		}
+		t.Cleanup(closeConnection)
+		if authenticated {
+			closeAccounts = append(closeAccounts, closeConnection)
+		}
 		if response.Body != nil {
 			if err := response.Body.Close(); err != nil {
 				t.Fatal(err)
@@ -366,14 +380,14 @@ func TestAccountNetworkStatusStaysIndependentAcrossReconnects(t *testing.T) {
 		readStatus(conn, snapshot(authenticated, want))
 		return conn
 	}
-	account := connect(true, "stopped")
+	account := connect(true, "connecting")
 	guest := connect(false, "connected")
 	for _, step := range []struct {
 		name                   string
 		accountID              int64
 		state, personal, guest string
 	}{
-		{"observer update before personal startup", 0, "connected", "stopped", "connected"},
+		{"observer update before personal startup", 0, "connected", "connecting", "connected"},
 		{"personal startup", user.ID, "connecting", "connecting", "connected"},
 		{"observer disconnect during startup", 0, "disconnected", "connecting", "disconnected"},
 		{"personal connected before JOIN", user.ID, "connected", "connected", "disconnected"},
@@ -397,4 +411,18 @@ func TestAccountNetworkStatusStaysIndependentAcrossReconnects(t *testing.T) {
 			connect(true, "stopped")
 		}
 	}
+	app.receive(ctx, irc.Event{Kind: "status", AccountID: user.ID, State: "stopped"})
+	readStatus(account, snapshot(true, "stopped"))
+	for _, closeAccount := range closeAccounts {
+		closeAccount()
+	}
+	for range closeAccounts {
+		select {
+		case <-released:
+		case <-time.After(5 * time.Second):
+			t.Fatal("closed socket retained its IRC account lease")
+		}
+	}
+	snapshot(true, "connecting")
+	connect(true, "connecting")
 }

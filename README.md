@@ -84,6 +84,8 @@ Sign up and sign in with a nickname and password; no email input is required. Ne
 
 **Connected** is IRC connection status, not channel membership. It can appear before the current channel's JOIN is acknowledged. **Preparing to send** also covers browser/history startup; both your account and the shared reader must join the channel before sending. JOIN requests are paced 100ms apart. Check **Connection details** for IRC failures. Disabling translation does not bypass these delivery checks.
 
+Before its first personal IRC status arrives, a login shows `connecting` / `Waiting for IRC account connection`, not `stopped`. Real stop events remain visible to active clients; their cached terminal state is cleared when the last account subscription closes.
+
 The most recently active room opens by default, ahead of saved favorites; empty rooms fall back to configured order. New activity reorders the list without switching your open conversation. On mobile, swipe left across the conversation or tap the room-menu button to open the left drawer; swiping right from the left edge also opens it. Selecting a room, tapping the backdrop, or pressing Escape closes the drawer. Desktop keeps the persistent sidebar.
 
 `TRANSLATION_ENABLED=0` removes translation controls and background translation work. History, live messages, and outgoing messages remain original-only even if a browser saved Auto-translate as On. Provider settings are ignored; interface language selection remains available. Restart the app and reload open browser tabs after changing this setting. The default is `1`.

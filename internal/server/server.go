@@ -181,12 +181,11 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		s.mu.Lock()
 		if event.AccountID == 0 {
 			s.net = status
-		} else if event.State == "stopped" {
-			delete(s.accountStates, event.AccountID)
 		} else {
 			s.accountStates[event.AccountID] = status
 		}
 		s.broadcastLocked("", "", event.AccountID, frame{Type: "status"})
+		s.forgetStoppedAccountLocked(event.AccountID)
 		s.mu.Unlock()
 		s.refreshRooms(ctx, "", event.AccountID)
 		return
@@ -327,7 +326,20 @@ func (s *Server) networkStatusLocked(userID int64) network {
 	if status, ok := s.accountStates[userID]; ok {
 		return status
 	}
-	return network{State: "stopped", Detail: "IRC account connection stopped"}
+	return network{State: "connecting", Detail: "Waiting for IRC account connection"}
+}
+
+func (s *Server) forgetStoppedAccountLocked(userID int64) {
+	status, ok := s.accountStates[userID]
+	if !ok || status.State != "stopped" {
+		return
+	}
+	for sub := range s.subscribers {
+		if sub.userID == userID {
+			return
+		}
+	}
+	delete(s.accountStates, userID)
 }
 
 func (s *Server) broadcast(room, lang string, userID int64, f frame) {
