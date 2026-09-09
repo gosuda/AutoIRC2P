@@ -3,7 +3,7 @@
   import AuthDialog from '$lib/AuthDialog.svelte';
   import Composer from '$lib/Composer.svelte';
   import MessageFeed from '$lib/MessageFeed.svelte';
-  import { APIError, errorText, mergeOutgoing, request, subscribeRoom, type Cursors, type Language, type Message, type Network, type Outgoing, type Room, type Session, type User } from '$lib/api';
+  import { APIError, errorText, mergeOutgoing, request, subscribeRoom, type Cursors, type Language, type Message, type Network, type Outgoing, type Room, type RoomState, type Session, type User } from '$lib/api';
   import { copy, languageName } from '$lib/i18n';
 
   let language = $state<Language>('en');
@@ -47,10 +47,11 @@
   let accountEpoch = 0;
   let preferencesKey = '';
   let locallySubmitted = new Set<string>();
+  const historyCache = new Map<string, Message[]>();
   const text = $derived(copy[language]);
   const autoTranslate = $derived(translationEnabled && autoTranslatePreference);
   const room = $derived(rooms.find((candidate) => candidate.name === roomName));
-  const ready = $derived(!!user && subscription === 'live' && room?.readState === 'ready' && room?.sendState === 'ready' && !historyLoading && !historyError);
+  const ready = $derived(!!user && subscription === 'live' && room?.sendState === 'ready');
   const visibleOutgoing = $derived(Object.values(outgoing).filter((send) => send.room === roomName && (send.state === 'confirmed' || Date.parse(send.expiresAt) > now)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)));
   const draft = $derived(drafts[roomName] ?? '');
   const busy = $derived(!!submitting[roomName] || visibleOutgoing.some((send) => send.original === draft && ['translating', 'sending', 'awaiting_echo'].includes(send.state)));
@@ -60,10 +61,10 @@
     if (favoritesOnly) return favorites.includes(candidate.name);
     return showAll || favorites.includes(candidate.name) || candidate.unreadCount > 0 || candidate.name === roomName || (favorites.length === 0 && index < 3);
   }).sort((a, b) => b.latestMessageId - a.latestMessageId));
-  const connectionLabel = $derived(!room || historyLoading || room.readState === 'loading' ? text.loadingHistory
-    : historyError || room.readState === 'unavailable' || room.sendState === 'unavailable' ? text.unavailable
-    : subscription !== 'live' ? text[subscription]
-    : user ? ready ? text.readyToChat : text.preparing : text.live);
+  const connectionLabel = $derived(subscription !== 'live' ? text[subscription]
+    : user ? ready ? text.readyToChat : room?.sendState === 'unavailable' ? text.unavailable : text.preparing
+    : room?.readState === 'unavailable' ? text.readerUnavailable
+    : room?.readState === 'ready' ? text.live : text.readerConnecting);
 
   function storedPreferences(value: string | null): { favorites: string[]; cursors: Cursors; autoTranslate: boolean } {
     const result = { favorites: [] as string[], cursors: {} as Cursors, autoTranslate: false };
@@ -145,6 +146,7 @@
     if (preferencesKey && user?.id === next?.id) { user = next; return; }
     active?.stop();
     active = undefined;
+    historyCache.clear();
     accountController.abort();
     accountController = new AbortController();
     accountEpoch++;
@@ -189,6 +191,14 @@
     if (baselineChanged) { cursors = mergedCursors; persistPreferences(); }
     const normalized = next.map((candidate) => candidate.latestMessageId <= (cursors[candidate.name] ?? -1) ? { ...candidate, unreadCount: 0 } : candidate);
     rooms = replace ? normalized : rooms.map((candidate) => normalized.find((incoming) => incoming.name === candidate.name) ?? candidate);
+  }
+
+  function receiveRoomStates(next: RoomState[]) {
+    const states = new Map(next.map((state) => [state.name, state]));
+    rooms = rooms.map((candidate) => {
+      const state = states.get(candidate.name);
+      return state ? { ...candidate, readState: state.readState, sendState: state.sendState } : candidate;
+    });
   }
 
   function markRead(selectedRoom: string, messageId: number) {
@@ -240,9 +250,7 @@
       network = session.network;
       translationEnabled = session.translationEnabled;
       switchAccount(session.user);
-      const snapshot = await request<{ rooms: Room[] }>(`/api/rooms?${new URLSearchParams({ cursors: JSON.stringify(cursors) })}`, { signal });
-      if (signal.aborted) return;
-      receiveRooms(snapshot.rooms, true);
+      receiveRooms(session.rooms, true);
       if (!initialized || !rooms.some((candidate) => candidate.name === roomName)) roomName = mostRecentRoomName();
       initialized = true;
       reconnectVersion++;
@@ -313,6 +321,7 @@
         language: selectedLanguage,
         autoTranslate: selectedAutoTranslate,
         userId: selectedUserId,
+        historyCache,
         cursors: () => cursors,
         onIdentityMismatch: refreshAccount,
         onMessages: (incoming) => {
@@ -324,6 +333,7 @@
           }
         },
         onRooms: receiveRooms,
+        onRoomStates: receiveRoomStates,
         onSends: receiveSends,
         onSendsError: (error) => { sendsError = error; },
         onNetwork: (incoming) => { network = incoming; },
@@ -415,6 +425,7 @@
     try {
       await request<void>('/api/auth/logout', { method: 'POST' });
       notifyAccountChange();
+      initialized = false;
       switchAccount(null);
       await restoreSession();
     } catch (error) { actionError = errorText(error); }
@@ -422,6 +433,7 @@
   }
 
   function authenticated(next: User) {
+    initialized = false;
     switchAccount(next);
     authMode = null;
     notifyAccountChange();
@@ -498,6 +510,7 @@
     </header>
     <div class="conversation-status" aria-live="polite">
       <span class="feed-status"><span class="status-dot" class:ready={ready || (!user && subscription === 'live' && room?.readState === 'ready')} aria-hidden="true"></span>{connectionLabel}</span>
+      {#if ready && room?.readState !== 'ready'}<span>{room?.readState === 'unavailable' ? text.readerUnavailable : text.readerConnecting}</span>{/if}
       {#if translationEnabled && room}<span>{text.outgoingLanguage} <strong>{languageName(room.language, language)}</strong></span>{/if}
       {#if subscription === 'reconnecting' || room?.sendState === 'unavailable' || room?.readState === 'unavailable'}<button type="button" class="text-button connection-retry" disabled={restoring} onclick={() => void restoreSession()}>{text.retry}</button>{/if}
       <span class="read-mode">{user ? `@${user.nick}` : text.guest}</span>

@@ -51,14 +51,15 @@ type Message struct {
 	senderRequestID  string
 }
 type frame struct {
-	Type    string    `json:"type"`
-	Message *Message  `json:"message,omitempty"`
-	State   string    `json:"state,omitempty"`
-	Detail  string    `json:"detail,omitempty"`
-	Rooms   []Room    `json:"rooms,omitempty"`
-	Room    *Room     `json:"room,omitempty"`
-	Send    *Outgoing `json:"send,omitempty"`
-	UserID  *int64    `json:"userId,omitempty"`
+	Type       string      `json:"type"`
+	Message    *Message    `json:"message,omitempty"`
+	State      string      `json:"state,omitempty"`
+	Detail     string      `json:"detail,omitempty"`
+	Rooms      []Room      `json:"rooms,omitempty"`
+	Room       *Room       `json:"room,omitempty"`
+	RoomStates []roomState `json:"roomStates,omitempty"`
+	Send       *Outgoing   `json:"send,omitempty"`
+	UserID     *int64      `json:"userId,omitempty"`
 }
 type network struct {
 	State  string `json:"state"`
@@ -72,6 +73,7 @@ type subscription struct {
 	once         sync.Once
 	cursorMu     sync.Mutex
 	cursors      map[string]int64
+	roomStates   map[string]roomState
 	cursorBudget tokenBucket
 }
 
@@ -187,10 +189,10 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		s.broadcastLocked("", "", event.AccountID, frame{Type: "status"})
 		s.forgetStoppedAccountLocked(event.AccountID)
 		s.mu.Unlock()
-		s.refreshRooms(ctx, "", event.AccountID)
+		s.refreshRoomStates("", event.AccountID)
 		return
 	case "membership":
-		s.refreshRooms(ctx, event.Room, event.AccountID)
+		s.refreshRoomStates(event.Room, event.AccountID)
 		return
 	}
 	if event.Service {
@@ -244,7 +246,7 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		s.publishSend(*confirmed)
 	}
 	s.outgoingMu.Unlock()
-	s.refreshRooms(ctx, row.Room, 0)
+	s.refreshRoom(ctx, row.Room)
 	languages := []string{"original"}
 	if s.translator != nil {
 		languages = []string{"en", "ko", "original"}

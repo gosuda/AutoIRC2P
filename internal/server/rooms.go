@@ -22,6 +22,12 @@ type Room struct {
 	SendState       string `json:"sendState"`
 }
 
+type roomState struct {
+	Name      string `json:"name"`
+	ReadState string `json:"readState"`
+	SendState string `json:"sendState"`
+}
+
 var errInvalidCursors = errors.New("invalid read cursors")
 var errCursorRateLimited = errors.New("cursor rate exceeded")
 
@@ -57,53 +63,45 @@ func (s *Server) roomStates(userID int64, room string) (string, string) {
 		return read, "login_required"
 	}
 	account := s.bridge.RoomState(userID, room)
-	if observer == irc.RoomUnavailable || account == irc.RoomUnavailable {
+	if account == irc.RoomUnavailable {
 		return read, "unavailable"
 	}
-	if observer == irc.RoomReady && account == irc.RoomReady {
+	if account == irc.RoomReady {
 		return read, "ready"
 	}
 	return read, "preparing"
 }
 
 func (s *Server) roomMetadata(ctx context.Context, userID int64, name string, cursors map[string]int64) (Room, error) {
-	room := Room{Name: name}
-	if s.translator != nil {
-		room.Language = translate.RoomTargetLanguage(name)
+	summaries, err := s.q.RoomSummaries(ctx, []string{name}, cursors, userID)
+	if err != nil {
+		return Room{}, err
 	}
-	room.ReadState, room.SendState = s.roomStates(userID, name)
-	err := s.q.Transaction(ctx, func(q *store.Queries) error {
-		latest, err := q.LatestRoomMessage(ctx, name)
-		if err != nil {
-			return err
-		}
-		room.LatestMessageID = latest
-		cursor, exists := cursors[name]
-		if !exists {
-			cursors[name] = latest
-			return nil
-		}
-		cursor, err = q.BoundReadCursor(ctx, store.BoundReadCursorParams{Room: name, ID: cursor})
-		if err != nil {
-			return err
-		}
-		cursors[name] = cursor
-		room.UnreadCount, err = q.UnreadMessages(ctx, store.UnreadMessagesParams{Room: name, ID: cursor, SenderUserID: userID})
-		return err
-	})
-	return room, err
+	summary := summaries[0]
+	cursors[name] = summary.Cursor
+	return s.roomFromSummary(userID, summary), nil
 }
 
 func (s *Server) allRooms(ctx context.Context, userID int64, cursors map[string]int64) ([]Room, error) {
-	rooms := make([]Room, 0, len(s.cfg.Rooms))
-	for _, name := range s.cfg.Rooms {
-		room, err := s.roomMetadata(ctx, userID, name, cursors)
-		if err != nil {
-			return nil, err
-		}
-		rooms = append(rooms, room)
+	summaries, err := s.q.RoomSummaries(ctx, s.cfg.Rooms, cursors, userID)
+	if err != nil {
+		return nil, err
+	}
+	rooms := make([]Room, 0, len(summaries))
+	for _, summary := range summaries {
+		cursors[summary.Name] = summary.Cursor
+		rooms = append(rooms, s.roomFromSummary(userID, summary))
 	}
 	return rooms, nil
+}
+
+func (s *Server) roomFromSummary(userID int64, summary store.RoomSummary) Room {
+	room := Room{Name: summary.Name, LatestMessageID: summary.LatestMessageID, UnreadCount: summary.UnreadCount}
+	if s.translator != nil {
+		room.Language = translate.RoomTargetLanguage(summary.Name)
+	}
+	room.ReadState, room.SendState = s.roomStates(userID, summary.Name)
+	return room
 }
 
 func (s *Server) rooms(w http.ResponseWriter, r *http.Request) {
@@ -134,28 +132,64 @@ func (sub *subscription) push(f frame) {
 	}
 }
 
-func (s *Server) refreshRooms(ctx context.Context, name string, userID int64) {
+func (s *Server) subscriptionsFor(userID int64) []*subscription {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	subs := make([]*subscription, 0, len(s.subscribers))
 	for sub := range s.subscribers {
 		if userID == 0 || sub.userID == userID {
 			subs = append(subs, sub)
 		}
 	}
-	s.mu.Unlock()
-	for _, sub := range subs {
-		sub.cursorMu.Lock()
-		names := s.cfg.Rooms
-		if name != "" {
-			names = []string{name}
+	return subs
+}
+
+func (sub *subscription) rememberRoomState(room Room) {
+	if sub.roomStates == nil {
+		sub.roomStates = make(map[string]roomState)
+	}
+	sub.roomStates[room.Name] = roomState{Name: room.Name, ReadState: room.ReadState, SendState: room.SendState}
+}
+
+func (s *Server) refreshRoomStates(name string, userID int64) {
+	names := s.cfg.Rooms
+	if name != "" {
+		if !s.roomAllowed(name) {
+			return
 		}
+		names = []string{name}
+	}
+	for _, sub := range s.subscriptionsFor(userID) {
+		sub.cursorMu.Lock()
+		var changed []roomState
 		for _, roomName := range names {
-			room, err := s.roomMetadata(ctx, sub.userID, roomName, sub.cursors)
-			if err != nil {
-				log.Error().Err(err).Msg("refresh room metadata")
-				sub.close()
-				break
+			read, send := s.roomStates(sub.userID, roomName)
+			state := roomState{Name: roomName, ReadState: read, SendState: send}
+			if previous, exists := sub.roomStates[roomName]; exists && previous == state {
+				continue
 			}
+			if sub.roomStates == nil {
+				sub.roomStates = make(map[string]roomState)
+			}
+			sub.roomStates[roomName] = state
+			changed = append(changed, state)
+		}
+		if len(changed) != 0 {
+			sub.push(frame{Type: "roomStates", RoomStates: changed})
+		}
+		sub.cursorMu.Unlock()
+	}
+}
+
+func (s *Server) refreshRoom(ctx context.Context, name string) {
+	for _, sub := range s.subscriptionsFor(0) {
+		sub.cursorMu.Lock()
+		room, err := s.roomMetadata(ctx, sub.userID, name, sub.cursors)
+		if err != nil {
+			log.Error().Err(err).Msg("refresh room metadata")
+			sub.close()
+		} else {
+			sub.rememberRoomState(room)
 			sub.push(frame{Type: "room", Room: &room})
 		}
 		sub.cursorMu.Unlock()
@@ -171,17 +205,13 @@ func (s *Server) markRead(ctx context.Context, sub *subscription, room string, i
 	if !s.cfg.Security.DisableRateLimits && !sub.cursorBudget.allow(time.Now(), s.cfg.Security.CursorUpdatesPerMinute, 30) {
 		return errCursorRateLimited
 	}
-	bounded, err := s.q.BoundReadCursor(ctx, store.BoundReadCursorParams{Room: room, ID: id})
+	cursors := map[string]int64{room: max(id, sub.cursors[room])}
+	metadata, err := s.roomMetadata(ctx, sub.userID, room, cursors)
 	if err != nil {
 		return err
 	}
-	if bounded > sub.cursors[room] {
-		sub.cursors[room] = bounded
-	}
-	metadata, err := s.roomMetadata(ctx, sub.userID, room, sub.cursors)
-	if err != nil {
-		return err
-	}
+	sub.cursors[room] = cursors[room]
+	sub.rememberRoomState(metadata)
 	sub.push(frame{Type: "room", Room: &metadata})
 	return nil
 }

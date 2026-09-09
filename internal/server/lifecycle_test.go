@@ -19,15 +19,21 @@ import (
 )
 
 type lifecycleBridge struct {
-	state irc.MembershipState
-	send  func(context.Context, int64, string, string) error
+	state         irc.MembershipState
+	observerState irc.MembershipState
+	send          func(context.Context, int64, string, string) error
 }
 
 func (b *lifecycleBridge) Acquire(context.Context, irc.Account) (func(), error) {
 	return func() {}, nil
 }
 func (b *lifecycleBridge) Retain(context.Context, int64) (func(), error) { return func() {}, nil }
-func (b *lifecycleBridge) RoomState(int64, string) irc.MembershipState   { return b.state }
+func (b *lifecycleBridge) RoomState(accountID int64, _ string) irc.MembershipState {
+	if accountID == 0 && b.observerState != "" {
+		return b.observerState
+	}
+	return b.state
+}
 func (b *lifecycleBridge) Send(ctx context.Context, id int64, room, text string) error {
 	return b.send(ctx, id, room, text)
 }
@@ -140,6 +146,39 @@ func TestPreparingRoomDoesNotTranslateOrSend(t *testing.T) {
 	}
 	if app.translator.(*translationStub).calls.Load() != 0 {
 		t.Fatal("provider called before readiness")
+	}
+}
+
+func TestSendingDependsOnSenderMembershipNotObserver(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		sender, observer   irc.MembershipState
+		wantStatus, writes int
+	}{
+		{"reader still joining", irc.RoomReady, irc.RoomPreparing, http.StatusOK, 1},
+		{"reader unavailable", irc.RoomReady, irc.RoomUnavailable, http.StatusOK, 1},
+		{"sender still joining", irc.RoomPreparing, irc.RoomReady, http.StatusConflict, 0},
+		{"sender removed", irc.RoomUnavailable, irc.RoomReady, http.StatusConflict, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writes := 0
+			bridge := &lifecycleBridge{state: tc.sender, observerState: tc.observer, send: func(_ context.Context, _ int64, room, text string) error {
+				writes++
+				if room != "#one" || text != "hello without the reader" {
+					t.Fatalf("IRC write = %q %q", room, text)
+				}
+				return nil
+			}}
+			app, _, token := lifecycleServer(t, bridge)
+			app.translator = nil
+			response, outgoing := postOutgoing(t, app, token, "hello without the reader", "independent_readiness_01", true)
+			if response.Code != tc.wantStatus || writes != tc.writes {
+				t.Fatalf("send status=%d writes=%d, want %d/%d: %s", response.Code, writes, tc.wantStatus, tc.writes, response.Body.String())
+			}
+			if tc.wantStatus == http.StatusOK && outgoing.State != "awaiting_echo" {
+				t.Fatalf("write without observer confirmation = %q, want awaiting_echo", outgoing.State)
+			}
+		})
 	}
 }
 

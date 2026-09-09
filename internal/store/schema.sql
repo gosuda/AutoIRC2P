@@ -35,6 +35,7 @@ CREATE TABLE messages (
  ,sender_request_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX messages_room_id ON messages(room, id DESC);
+CREATE INDEX messages_unread ON messages(room,id,sender_user_id) WHERE service = 0;
 CREATE TABLE translations (
  cache_key TEXT PRIMARY KEY,
  translated TEXT NOT NULL,

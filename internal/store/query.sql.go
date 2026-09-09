@@ -141,22 +141,6 @@ func (q *Queries) BackupUserSecrets(ctx context.Context, id int64) ([]BackupUser
 	return items, nil
 }
 
-const boundReadCursor = `-- name: BoundReadCursor :one
-SELECT CAST(COALESCE(MAX(id),0) AS INTEGER) FROM messages WHERE room = ? AND id <= ?
-`
-
-type BoundReadCursorParams struct {
-	Room string `json:"room"`
-	ID   int64  `json:"id"`
-}
-
-func (q *Queries) BoundReadCursor(ctx context.Context, arg BoundReadCursorParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, boundReadCursor, arg.Room, arg.ID)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const cachedTranslation = `-- name: CachedTranslation :one
 SELECT translated FROM translations WHERE cache_key = ?
 `
@@ -492,17 +476,6 @@ func (q *Queries) InitializeUserIdentityPool(ctx context.Context, arg Initialize
 	return identity_pool, err
 }
 
-const latestRoomMessage = `-- name: LatestRoomMessage :one
-SELECT CAST(COALESCE(MAX(id),0) AS INTEGER) FROM messages WHERE room = ?
-`
-
-func (q *Queries) LatestRoomMessage(ctx context.Context, room string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, latestRoomMessage, room)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const listSends = `-- name: ListSends :many
 SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged FROM send_requests WHERE user_id = ? AND room = ? AND payload_purged = 0 AND (state = 'confirmed' OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50
 `
@@ -764,6 +737,76 @@ func (q *Queries) SaveTranslation(ctx context.Context, arg SaveTranslationParams
 	return err
 }
 
+const selectRoomSummaries = `-- name: SelectRoomSummaries :many
+WITH input AS (
+ SELECT CAST(?2 AS TEXT) AS rooms
+), requested AS (
+ SELECT CAST(key AS INTEGER) AS ordinal,
+        CAST(json_extract(value, '$.name') AS TEXT) AS name,
+        CAST(json_extract(value, '$.cursor') AS INTEGER) AS supplied_cursor,
+        CAST(json_extract(value, '$.hasCursor') AS INTEGER) AS has_cursor
+ FROM input, json_each(input.rooms)
+), bounds AS (
+ SELECT ordinal, name, has_cursor,
+        COALESCE((SELECT MAX(m.id) FROM messages AS m WHERE m.room = requested.name), 0) AS latest_message_id,
+        CASE WHEN has_cursor THEN
+         COALESCE((SELECT MAX(m.id) FROM messages AS m WHERE m.room = requested.name AND m.id <= requested.supplied_cursor), 0)
+        ELSE 0 END AS bounded_cursor
+ FROM requested
+ -- Group only input rows to prevent flattening and repeated bound lookups; SQLC cannot parse MATERIALIZED.
+ GROUP BY ordinal
+)
+SELECT CAST(name AS TEXT) AS name,
+       CAST(latest_message_id AS INTEGER) AS latest_message_id,
+       CAST(CASE WHEN has_cursor THEN bounded_cursor ELSE latest_message_id END AS INTEGER) AS cursor,
+       CAST(CASE WHEN has_cursor THEN (
+        SELECT COUNT(*) FROM messages AS m
+        WHERE m.room = bounds.name AND m.id > bounds.bounded_cursor AND m.service = 0
+          AND (m.sender_user_id = 0 OR m.sender_user_id != ?1)
+       ) ELSE 0 END AS INTEGER) AS unread_count
+FROM bounds ORDER BY ordinal
+`
+
+type SelectRoomSummariesParams struct {
+	UserID int64  `json:"user_id"`
+	Rooms  string `json:"rooms"`
+}
+
+type SelectRoomSummariesRow struct {
+	Name            string `json:"name"`
+	LatestMessageID int64  `json:"latest_message_id"`
+	Cursor          int64  `json:"cursor"`
+	UnreadCount     int64  `json:"unread_count"`
+}
+
+func (q *Queries) SelectRoomSummaries(ctx context.Context, arg SelectRoomSummariesParams) ([]SelectRoomSummariesRow, error) {
+	rows, err := q.db.QueryContext(ctx, selectRoomSummaries, arg.UserID, arg.Rooms)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SelectRoomSummariesRow{}
+	for rows.Next() {
+		var i SelectRoomSummariesRow
+		if err := rows.Scan(
+			&i.Name,
+			&i.LatestMessageID,
+			&i.Cursor,
+			&i.UnreadCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const sessionUser = `-- name: SessionUser :one
 SELECT users.id, users.email, users.nick, users.password_salt, users.password_hash, users.irc_password, users.identity_keys, users.identity_address, users.identity_pool, users.irc_registered, users.created_at FROM users JOIN sessions ON users.id = sessions.user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?
 `
@@ -790,23 +833,6 @@ func (q *Queries) SessionUser(ctx context.Context, arg SessionUserParams) (User,
 		&i.CreatedAt,
 	)
 	return i, err
-}
-
-const unreadMessages = `-- name: UnreadMessages :one
-SELECT COUNT(*) FROM messages WHERE room = ? AND id > ? AND service = 0 AND (sender_user_id = 0 OR sender_user_id != ?)
-`
-
-type UnreadMessagesParams struct {
-	Room         string `json:"room"`
-	ID           int64  `json:"id"`
-	SenderUserID int64  `json:"sender_user_id"`
-}
-
-func (q *Queries) UnreadMessages(ctx context.Context, arg UnreadMessagesParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, unreadMessages, arg.Room, arg.ID, arg.SenderUserID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
 }
 
 const userByID = `-- name: UserByID :one

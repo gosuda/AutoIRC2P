@@ -11,7 +11,7 @@ import (
 )
 
 func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
-	for _, version := range []int{1, 2, 3, 4} {
+	for _, version := range []int{1, 2, 3, 4, 5} {
 		t.Run(fmt.Sprintf("version%d", version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "legacy.sqlite")
 			legacy, err := sql.Open("sqlite", path)
@@ -57,6 +57,14 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 					t.Fatal(errors.Join(err, legacy.Close()))
 				}
 			}
+			if version >= 5 {
+				if _, err := legacy.Exec(migration5 + `
+ UPDATE users SET identity_pool=X'0607';
+ UPDATE observer SET identity_pool=X'0809';
+ PRAGMA user_version=5;`); err != nil {
+					t.Fatal(errors.Join(err, legacy.Close()))
+				}
+			}
 			if err := validateSchema(t.Context(), legacy, version); err != nil {
 				t.Fatal(errors.Join(err, legacy.Close()))
 			}
@@ -76,8 +84,8 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			if err := db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&currentVersion); err != nil {
 				t.Fatal(err)
 			}
-			if currentVersion != 5 {
-				t.Fatalf("database version = %d, want 5", currentVersion)
+			if currentVersion != 6 {
+				t.Fatalf("database version = %d, want 6", currentVersion)
 			}
 			if err := validateSchema(t.Context(), db, currentVersion); err != nil {
 				t.Fatal(err)
@@ -105,6 +113,10 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			}
 			if message.SenderUserID != 1 || message.SenderRequestID != "confirmed-request" {
 				t.Fatalf("message echo ownership changed: %+v", message)
+			}
+			summaries, err := q.RoomSummaries(t.Context(), []string{"#one"}, map[string]int64{"#one": 0}, 0)
+			if err != nil || len(summaries) != 1 || summaries[0].LatestMessageID != 7 || summaries[0].Cursor != 0 || summaries[0].UnreadCount != 1 {
+				t.Fatalf("migrated room summary: %+v %v", summaries, err)
 			}
 			confirmed, err := q.GetSend(t.Context(), GetSendParams{UserID: 1, RequestID: "confirmed-request"})
 			if err != nil {
@@ -175,7 +187,11 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			if err != nil || observer.Nick != "observer" || !bytes.Equal(observer.IdentityKeys, []byte{5}) || observer.IdentityAddress != "observer.b32.i2p" {
 				t.Fatalf("observer identity lost: %+v %v", observer, err)
 			}
-			if len(user.IdentityPool) != 0 || len(observer.IdentityPool) != 0 {
+			if version >= 5 {
+				if !bytes.Equal(user.IdentityPool, []byte{6, 7}) || !bytes.Equal(observer.IdentityPool, []byte{8, 9}) {
+					t.Fatal("migration changed existing destination keys")
+				}
+			} else if len(user.IdentityPool) != 0 || len(observer.IdentityPool) != 0 {
 				t.Fatal("migration invented destination keys")
 			}
 			retained, err := q.Prune(t.Context(), time.Now(), RetentionPolicy{Translations: time.Hour, BatchSize: 1})

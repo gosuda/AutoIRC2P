@@ -151,7 +151,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		msg := messageFrom(rows[i], lang)
 		messages = append(messages, personalize(msg, viewer.ID))
 	}
-	writeJSON(w, 200, map[string]any{"messages": messages})
+	writeJSON(w, 200, map[string]any{"userId": viewer.ID, "messages": messages})
 	for _, msg := range messages {
 		if msg.TranslationState == "pending" {
 			s.enqueue(msg, lang)

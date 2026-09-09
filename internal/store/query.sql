@@ -52,12 +52,34 @@ UPDATE send_requests SET echo_consumed = 1, message_id = ?, state = 'confirmed',
 UPDATE send_requests SET state = 'unconfirmed', error_code = 'echo_timeout', updated_at = ? WHERE state = 'awaiting_echo' AND expires_at <= ? RETURNING *;
 -- name: RecoverSends :exec
 UPDATE send_requests SET state = CASE WHEN state = 'translating' THEN 'failed' ELSE 'unconfirmed' END, error_code = 'interrupted' WHERE state IN ('translating','sending','awaiting_echo');
--- name: LatestRoomMessage :one
-SELECT CAST(COALESCE(MAX(id),0) AS INTEGER) FROM messages WHERE room = ?;
--- name: BoundReadCursor :one
-SELECT CAST(COALESCE(MAX(id),0) AS INTEGER) FROM messages WHERE room = ? AND id <= ?;
--- name: UnreadMessages :one
-SELECT COUNT(*) FROM messages WHERE room = ? AND id > ? AND service = 0 AND (sender_user_id = 0 OR sender_user_id != ?);
+-- name: SelectRoomSummaries :many
+WITH input AS (
+ SELECT CAST(sqlc.arg(rooms) AS TEXT) AS rooms
+), requested AS (
+ SELECT CAST(key AS INTEGER) AS ordinal,
+        CAST(json_extract(value, '$.name') AS TEXT) AS name,
+        CAST(json_extract(value, '$.cursor') AS INTEGER) AS supplied_cursor,
+        CAST(json_extract(value, '$.hasCursor') AS INTEGER) AS has_cursor
+ FROM input, json_each(input.rooms)
+), bounds AS (
+ SELECT ordinal, name, has_cursor,
+        COALESCE((SELECT MAX(m.id) FROM messages AS m WHERE m.room = requested.name), 0) AS latest_message_id,
+        CASE WHEN has_cursor THEN
+         COALESCE((SELECT MAX(m.id) FROM messages AS m WHERE m.room = requested.name AND m.id <= requested.supplied_cursor), 0)
+        ELSE 0 END AS bounded_cursor
+ FROM requested
+ -- Group only input rows to prevent flattening and repeated bound lookups; SQLC cannot parse MATERIALIZED.
+ GROUP BY ordinal
+)
+SELECT CAST(name AS TEXT) AS name,
+       CAST(latest_message_id AS INTEGER) AS latest_message_id,
+       CAST(CASE WHEN has_cursor THEN bounded_cursor ELSE latest_message_id END AS INTEGER) AS cursor,
+       CAST(CASE WHEN has_cursor THEN (
+        SELECT COUNT(*) FROM messages AS m
+        WHERE m.room = bounds.name AND m.id > bounds.bounded_cursor AND m.service = 0
+          AND (m.sender_user_id = 0 OR m.sender_user_id != sqlc.arg(user_id))
+       ) ELSE 0 END AS INTEGER) AS unread_count
+FROM bounds ORDER BY ordinal;
 -- name: PruneMessagesBatch :execrows
 DELETE FROM messages WHERE id IN (SELECT m.id FROM messages AS m WHERE m.created_at < ? ORDER BY m.created_at LIMIT ?);
 -- name: PruneTranslationsBatch :execrows

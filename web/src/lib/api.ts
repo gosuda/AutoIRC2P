@@ -8,6 +8,7 @@ export type Room = {
   readState: 'loading' | 'ready' | 'unavailable';
   sendState: 'login_required' | 'preparing' | 'ready' | 'unavailable';
 };
+export type RoomState = Pick<Room, 'name' | 'readState' | 'sendState'>;
 export type Outgoing = {
   requestId: string;
   room: string;
@@ -45,6 +46,7 @@ type Frame = { type: 'message' | 'translation'; message: Message }
   | { type: 'identity'; userId: number }
   | { type: 'rooms'; rooms: Room[] }
   | { type: 'room'; room: Room }
+  | { type: 'roomStates'; roomStates: RoomState[] }
   | { type: 'send'; send: Outgoing };
 
 export class APIError extends Error {
@@ -54,12 +56,20 @@ export class APIError extends Error {
   }
 }
 
+const readRequestTimeoutMs = 10_000;
+const maxCachedRooms = 32;
+const maxCachedMessages = 100;
+
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  const method = options.method?.toUpperCase() ?? 'GET';
+  const timeout = method === 'GET' || method === 'HEAD' ? AbortSignal.timeout(readRequestTimeoutMs) : undefined;
+  const signal = timeout && options.signal ? AbortSignal.any([options.signal, timeout]) : timeout ?? options.signal;
   const response = await fetch(path, {
     ...options,
     credentials: 'same-origin',
+    signal,
     cache: 'no-store',
     headers
   });
@@ -126,9 +136,11 @@ export function subscribeRoom(options: {
   language: Language;
   autoTranslate: boolean;
   userId: number;
+  historyCache: Map<string, Message[]>;
   cursors: () => Cursors;
   onMessages: (messages: Message[]) => void;
   onRooms: (rooms: Room[], replace: boolean) => void;
+  onRoomStates: (states: RoomState[]) => void;
   onSends: (sends: Outgoing[]) => void;
   onSendsError: (error: string) => void;
   onNetwork: (network: Network) => void;
@@ -136,7 +148,10 @@ export function subscribeRoom(options: {
   onHistory: (loading: boolean, error: string) => void;
   onIdentityMismatch: () => void;
 }) {
-  const query = new URLSearchParams({ room: options.room, lang: options.autoTranslate ? options.language : 'original' });
+  const lang = options.autoTranslate ? options.language : 'original';
+  const query = new URLSearchParams({ room: options.room, lang });
+  const cacheKey = JSON.stringify([options.userId, options.room, lang]);
+  const cached = options.historyCache.get(cacheKey);
   const controller = new AbortController();
   let socket: WebSocket | undefined;
   let verifiedSocket: WebSocket | undefined;
@@ -145,17 +160,25 @@ export function subscribeRoom(options: {
   const pendingReads = new Map<string, number>();
   let stopped = false;
   let retries = 0;
-  let historyGeneration = 0;
   let historyPending = false;
-  let messages = new Map<number | string, Message>();
+  let historyKnown = cached !== undefined;
+  let refreshAfterHistory = false;
+  let messages = new Map<number | string, Message>((cached ?? []).map((message) => [messageKey(message), message]));
   let duringHistory = new Map<number | string, Message>();
 
   function publish() {
     const visible = [...messages.values()].filter((message) => {
       const nick = message.nick.toLowerCase();
       return nick !== 'nickserv' && nick !== 'chanserv';
-    });
-    options.onMessages(visible.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id - b.id));
+    }).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id - b.id);
+    if (historyKnown || visible.length > 0) {
+      options.historyCache.delete(cacheKey);
+      options.historyCache.set(cacheKey, visible.filter((message) => message.id > 0).slice(-maxCachedMessages));
+      while (options.historyCache.size > maxCachedRooms) {
+        options.historyCache.delete(options.historyCache.keys().next().value!);
+      }
+    }
+    options.onMessages(visible);
   }
 
   function mergeMessage(previous: Message | undefined, incoming: Message): Message {
@@ -165,14 +188,43 @@ export function subscribeRoom(options: {
     return incoming;
   }
 
+  function stop() {
+    if (stopped) return;
+    stopped = true;
+    controller.abort();
+    clearTimeout(retryTimer);
+    clearTimeout(readTimer);
+    pendingReads.clear();
+    if (socket) {
+      socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
+      socket.close();
+    }
+  }
+
+  function identityMismatch() {
+    options.historyCache.clear();
+    stop();
+    options.onMessages([]);
+    options.onIdentityMismatch();
+  }
+
   async function refreshHistory() {
-    const generation = ++historyGeneration;
+    if (stopped) return;
+    if (historyPending) {
+      refreshAfterHistory = true;
+      return;
+    }
     historyPending = true;
     duringHistory = new Map();
-    options.onHistory(true, '');
+    options.onHistory(!historyKnown, '');
+    let succeeded = false;
     try {
-      const data = await request<{ messages: Message[] }>(`/api/messages?${query}`, { signal: controller.signal });
-      if (stopped || generation !== historyGeneration) return;
+      const data = await request<{ userId: number; messages: Message[] }>(`/api/messages?${query}`, { signal: controller.signal });
+      if (stopped) return;
+      if (data.userId !== options.userId) {
+        identityMismatch();
+        return;
+      }
       const history = new Map(messages);
       for (const message of data.messages) {
         const key = messageKey(message);
@@ -180,15 +232,18 @@ export function subscribeRoom(options: {
       }
       for (const [key, message] of duringHistory) history.set(key, mergeMessage(history.get(key), message));
       messages = history;
+      historyKnown = true;
+      succeeded = true;
       publish();
       options.onHistory(false, '');
     } catch (error) {
-      if (!stopped && generation === historyGeneration) options.onHistory(false, errorText(error));
+      if (!stopped) options.onHistory(false, errorText(error));
     } finally {
-      if (generation === historyGeneration) {
-        historyPending = false;
-        duringHistory.clear();
-      }
+      historyPending = false;
+      duringHistory.clear();
+      const refresh = refreshAfterHistory;
+      refreshAfterHistory = false;
+      if (refresh && succeeded && !stopped) void refreshHistory();
     }
   }
 
@@ -239,11 +294,11 @@ export function subscribeRoom(options: {
       catch { current.close(); return; }
       if (frame.type === 'identity') {
         if (frame.userId !== options.userId) {
-          current.close();
-          options.onIdentityMismatch();
+          identityMismatch();
           return;
         }
         verifiedSocket = current;
+        // Refresh after subscription to recover the gap since the HTTP snapshot.
         void refreshHistory();
         void refreshSends();
         return;
@@ -255,6 +310,8 @@ export function subscribeRoom(options: {
         options.onSubscription('live');
       } else if (frame.type === 'room') {
         options.onRooms([frame.room], false);
+      } else if (frame.type === 'roomStates') {
+        options.onRoomStates(frame.roomStates);
       } else if (frame.type === 'send') {
         options.onSends([frame.send]);
       } else if (frame.type === 'status') {
@@ -279,20 +336,15 @@ export function subscribeRoom(options: {
     };
   }
 
+  publish();
+  void refreshHistory();
   connect();
   return {
     read,
-    refresh: () => { if (socket && socket === verifiedSocket) { void refreshHistory(); void refreshSends(); } },
-    stop: () => {
-      stopped = true;
-      controller.abort();
-      clearTimeout(retryTimer);
-      clearTimeout(readTimer);
-      pendingReads.clear();
-      if (socket) {
-        socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
-        socket.close();
-      }
-    }
+    refresh: () => {
+      void refreshHistory();
+      if (socket && socket === verifiedSocket) void refreshSends();
+    },
+    stop
   };
 }

@@ -196,14 +196,18 @@ func TestLiveWALBackupRestoresAuthenticationAndIdentity(t *testing.T) {
 	if err != nil || len(messages) != 1 || messages[0].Original != "committed WAL text" {
 		t.Fatalf("snapshot boundary: %+v %v", messages, err)
 	}
+	summaries, err := q.RoomSummaries(t.Context(), []string{"#one"}, map[string]int64{"#one": 0}, f.user.ID)
+	if err != nil || len(summaries) != 1 || summaries[0].LatestMessageID != message.ID || summaries[0].UnreadCount != 1 {
+		t.Fatalf("restored room summary: %+v %v", summaries, err)
+	}
 	translation, err := q.GetTranslation(t.Context(), "cache")
 	if err != nil || translation != "translated WAL text" {
 		t.Fatalf("WAL cache missing: %q %v", translation, err)
 	}
 }
 
-func TestHistoricalBackupsRestoreWithoutDestinationPoolColumns(t *testing.T) {
-	for _, version := range []int{1, 2, 3, 4} {
+func TestHistoricalBackupsRestoreAuthenticationAndMessageOwnership(t *testing.T) {
+	for _, version := range []int{1, 2, 3, 4, 5} {
 		t.Run(fmt.Sprintf("version%d", version), func(t *testing.T) {
 			f := newRecoveryFixture(t)
 			observer, err := f.service.Observer(t.Context())
@@ -311,6 +315,10 @@ INSERT INTO send_requests VALUES(1,'confirmed-request','sent',7,'#one','alice','
 			messages, err := q.Messages(t.Context(), store.MessagesParams{Room: "#one", ID: 8})
 			if err != nil || len(messages) != 1 || messages[0].Original != "historical text" || messages[0].SenderRequestID != "confirmed-request" {
 				t.Fatalf("historical message ownership lost: %v", err)
+			}
+			summaries, err := q.RoomSummaries(t.Context(), []string{"#one"}, map[string]int64{"#one": 0}, 0)
+			if err != nil || len(summaries) != 1 || summaries[0].LatestMessageID != 7 || summaries[0].UnreadCount != 1 {
+				t.Fatalf("historical room summary lost: %+v %v", summaries, err)
 			}
 			claimed, err := q.ClaimSend(t.Context(), store.ClaimSendParams{UserID: f.user.ID, RequestID: "confirmed-request", State: "translating"})
 			if err != nil || claimed != 0 {

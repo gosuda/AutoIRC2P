@@ -73,12 +73,10 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	sub.push(frame{Type: "identity", UserID: &sub.userID})
 	sub.cursorMu.Lock()
 	s.mu.Lock()
 	s.subscribers[sub] = struct{}{}
 	status := s.networkStatusLocked(sub.userID)
-	sub.push(frame{Type: "status", State: status.State, Detail: status.Detail})
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -87,21 +85,11 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		sub.close()
 	}()
-	rooms, roomErr := s.allRooms(ctx, sub.userID, sub.cursors)
-	if roomErr == nil {
-		sub.push(frame{Type: "rooms", Rooms: rooms})
-	}
-	sub.cursorMu.Unlock()
-	if roomErr != nil {
-		if err := conn.Close(); err != nil {
-			log.Debug().Err(err).Msg("websocket closed")
-		}
-		return
-	}
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
 		defer sub.close()
+		defer cancel()
 		conn.SetReadLimit(4096)
 		if err := conn.SetReadDeadline(time.Now().Add(75 * time.Second)); err != nil {
 			return
@@ -137,6 +125,32 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		}
 		<-readDone
 	}()
+	writeFrame := func(f frame) error {
+		if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return err
+		}
+		return conn.WriteJSON(f)
+	}
+	// Capture live events before the snapshot, but keep all bootstrap frames ahead of them.
+	if err := func() error {
+		defer sub.cursorMu.Unlock()
+		if err := writeFrame(frame{Type: "identity", UserID: &sub.userID}); err != nil {
+			return err
+		}
+		if err := writeFrame(frame{Type: "status", State: status.State, Detail: status.Detail}); err != nil {
+			return err
+		}
+		rooms, err := s.allRooms(ctx, sub.userID, sub.cursors)
+		if err != nil {
+			return err
+		}
+		for _, room := range rooms {
+			sub.rememberRoomState(room)
+		}
+		return writeFrame(frame{Type: "rooms", Rooms: rooms})
+	}(); err != nil {
+		return
+	}
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -146,10 +160,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		case <-sub.done:
 			return
 		case f := <-sub.out:
-			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-				return
-			}
-			if err := conn.WriteJSON(f); err != nil {
+			if err := writeFrame(f); err != nil {
 				return
 			}
 		case <-ticker.C:
