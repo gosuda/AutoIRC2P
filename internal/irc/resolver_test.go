@@ -2,6 +2,7 @@ package irc
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -10,9 +11,20 @@ import (
 	"testing"
 	"time"
 
-	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/client"
 )
+
+type resolverTestDialer struct {
+	target   string
+	listener net.Listener
+}
+
+func (d resolverTestDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if network != "i2p" || address != d.target {
+		return nil, fmt.Errorf("unexpected I2P destination: %s %s, want i2p %s", network, address, d.target)
+	}
+	return (&net.Dialer{}).DialContext(ctx, "tcp", d.listener.Addr().String())
+}
 
 func TestDialIRCResolvesHostOnTheAccountEndpoint(t *testing.T) {
 	identity, err := GenerateIdentity()
@@ -25,9 +37,8 @@ func TestDialIRCResolvesHostOnTheAccountEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer local.ReleaseSensitive()
-	destination := string(local.Destination())
 	hosts := filepath.Join(t.TempDir(), "hosts.txt")
-	if err := os.WriteFile(hosts, []byte("irc.example.i2p="+destination+"\n"), 0600); err != nil {
+	if err := os.WriteFile(hosts, []byte("irc.example.i2p="+string(local.Destination())+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	book, err := client.AddressBookNewService(client.AddressBookConfig{HostsPath: hosts})
@@ -40,15 +51,14 @@ func TestDialIRCResolvesHostOnTheAccountEndpoint(t *testing.T) {
 		}
 	}()
 	for _, tc := range []struct {
-		name, server, target string
-		book                 *client.AddressBookService
+		name, server, port string
+		book               *client.AddressBookService
 	}{
-		{"addressbook hostname", "irc.example.i2p:6667", net.JoinHostPort(destination, "6667"), book},
-		{"b32 without addressbook", net.JoinHostPort(identity.Address, "6697"), net.JoinHostPort(identity.Address, "6697"), nil},
+		{"addressbook hostname", "irc.example.i2p:6667", "6667", book},
+		{"b32 without addressbook", net.JoinHostPort(identity.Address, "6697"), "6697", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			endpoint := ivnp.NewLocalStreamNetwork()
-			listener, err := endpoint.ListenI2P(t.Context(), tc.target)
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -59,6 +69,7 @@ func TestDialIRCResolvesHostOnTheAccountEndpoint(t *testing.T) {
 					finished <- err
 					return
 				}
+				_ = incoming.SetWriteDeadline(time.Now().Add(time.Second))
 				_, err = fmt.Fprint(incoming, ":irc.example.i2p 001 reader :Welcome\r\n")
 				finished <- errors.Join(err, incoming.Close())
 			}()
@@ -71,6 +82,7 @@ func TestDialIRCResolvesHostOnTheAccountEndpoint(t *testing.T) {
 				}
 			}()
 			manager := &Manager{cfg: Config{Server: tc.server}, router: &routerRuntime{addressBook: tc.book}}
+			endpoint := resolverTestDialer{target: net.JoinHostPort(identity.Address, tc.port), listener: listener}
 			conn, err := manager.dialIRC(t.Context(), endpoint)
 			if err != nil {
 				t.Fatal(err)

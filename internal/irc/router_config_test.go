@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gosuda.org/ivnp"
+	"gosuda.org/ivnp/state"
 )
 
 func TestLoadRouterConfigCreatesPrivateConfigAndParents(t *testing.T) {
@@ -19,7 +19,7 @@ func TestLoadRouterConfigCreatesPrivateConfigAndParents(t *testing.T) {
 	if configuration.Tunnel.Hops != 1 {
 		t.Errorf("first-run hops = %d, want 1", configuration.Tunnel.Hops)
 	}
-	persisted, err := ivnp.LoadConfig(path)
+	persisted, err := state.ConfigurationLoadOperating(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestLoadRouterConfigSizesAccountPoolsWithoutOverridingOperatorLimits(t *tes
 		text string
 		want int
 	}{
-		{"automatic capacity", "[tunnel]\nhops = 1\n", 192},
+		{"automatic capacity", "[tunnel]\nhops = 1\n", 63},
 		{"explicit smaller limit", "[state]\nmax_destinations = 64\n", 64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,7 +137,7 @@ func TestLoadRouterConfigSizesAccountPoolsWithoutOverridingOperatorLimits(t *tes
 			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
 				t.Fatal(err)
 			}
-			configuration, err := loadRouterConfig(path, (62+1)*DestinationPoolSize+1+prewarmCapacity)
+			configuration, err := loadRouterConfig(path, (20+1)*DestinationPoolSize)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,5 +149,44 @@ func TestLoadRouterConfigSizesAccountPoolsWithoutOverridingOperatorLimits(t *tes
 				t.Fatalf("operator configuration changed: %q, %v", contents, err)
 			}
 		})
+	}
+}
+
+func TestRootConfigurationRejectsUnsupportedSettingsWithoutRewriting(t *testing.T) {
+	for _, text := range []string{
+		"[state]\nmax_destinations = 65\n",
+		"[tunnel]\nclient_pool_capacity = 16\n",
+		"[tunnel]\nbandwidth_rate_bytes_per_second = 1048576\n",
+		"[nat]\nnatpmp_endpoint = 127.0.0.1:5351\n",
+		"[sam]\nenabled = true\n",
+	} {
+		t.Run(text, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ivnp.conf")
+			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadRouterConfig(path, 53); err == nil {
+				t.Fatal("unsupported root configuration accepted")
+			}
+			contents, err := os.ReadFile(path)
+			if err != nil || string(contents) != text {
+				t.Fatalf("rejected configuration changed: %q, %v", contents, err)
+			}
+		})
+	}
+}
+
+func TestRootConfigurationRejectsMovingPersistedRouterKeys(t *testing.T) {
+	source := state.ConfigurationDefaultOperating()
+	source.KeyPath = filepath.Join(t.TempDir(), "existing.keys")
+	if err := os.WriteFile(source.KeyPath, []byte("existing private router state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := embeddedRouterConfig(source); err == nil {
+		t.Fatal("root configuration silently relocated the router key path")
+	}
+	keys, err := os.ReadFile(source.KeyPath)
+	if err != nil || string(keys) != "existing private router state" {
+		t.Fatalf("rejected configuration changed existing keys: %q, %v", keys, err)
 	}
 }

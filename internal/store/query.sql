@@ -39,7 +39,7 @@ INSERT INTO send_requests (user_id,request_id,room,nick,original,original_mode,s
 -- name: GetSend :one
 SELECT * FROM send_requests WHERE user_id = ? AND request_id = ?;
 -- name: ListSends :many
-SELECT * FROM send_requests WHERE user_id = ? AND room = ? AND payload_purged = 0 AND (state = 'confirmed' OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50;
+SELECT * FROM send_requests WHERE user_id = ? AND room = ? AND payload_purged = 0 AND dismissed = 0 AND (state IN ('confirmed','failed','unconfirmed') OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50;
 -- name: FinishSend :one
 UPDATE send_requests SET state = ?, error_code = ?, updated_at = ?, expires_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING *;
 -- name: PrepareSend :one
@@ -52,6 +52,8 @@ UPDATE send_requests SET echo_consumed = 1, message_id = ?, state = 'confirmed',
 UPDATE send_requests SET state = 'unconfirmed', error_code = 'echo_timeout', updated_at = ? WHERE state = 'awaiting_echo' AND expires_at <= ? RETURNING *;
 -- name: RecoverSends :exec
 UPDATE send_requests SET state = CASE WHEN state = 'translating' THEN 'failed' ELSE 'unconfirmed' END, error_code = 'interrupted' WHERE state IN ('translating','sending','awaiting_echo');
+-- name: DismissSend :one
+UPDATE send_requests SET dismissed = 1 WHERE user_id = ? AND request_id = ? AND state IN ('failed','unconfirmed') AND message_id = 0 AND payload_purged = 0 RETURNING *;
 -- name: SelectRoomSummaries :many
 WITH input AS (
  SELECT CAST(sqlc.arg(rooms) AS TEXT) AS rooms

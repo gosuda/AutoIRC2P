@@ -189,7 +189,7 @@ func (q *Queries) ClaimSend(ctx context.Context, arg ClaimSendParams) (int64, er
 }
 
 const consumeEcho = `-- name: ConsumeEcho :one
-UPDATE send_requests SET echo_consumed = 1, message_id = ?, state = 'confirmed', error_code = '', updated_at = ? WHERE user_id = ? AND request_id = ? RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged
+UPDATE send_requests SET echo_consumed = 1, message_id = ?, state = 'confirmed', error_code = '', updated_at = ? WHERE user_id = ? AND request_id = ? RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged, dismissed
 `
 
 type ConsumeEchoParams struct {
@@ -223,6 +223,7 @@ func (q *Queries) ConsumeEcho(ctx context.Context, arg ConsumeEchoParams) (SendR
 		&i.UpdatedAt,
 		&i.ExpiresAt,
 		&i.PayloadPurged,
+		&i.Dismissed,
 	)
 	return i, err
 }
@@ -309,8 +310,41 @@ func (q *Queries) DeleteSession(ctx context.Context, tokenHash []byte) error {
 	return err
 }
 
+const dismissSend = `-- name: DismissSend :one
+UPDATE send_requests SET dismissed = 1 WHERE user_id = ? AND request_id = ? AND state IN ('failed','unconfirmed') AND message_id = 0 AND payload_purged = 0 RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged, dismissed
+`
+
+type DismissSendParams struct {
+	UserID    int64  `json:"user_id"`
+	RequestID string `json:"request_id"`
+}
+
+func (q *Queries) DismissSend(ctx context.Context, arg DismissSendParams) (SendRequest, error) {
+	row := q.db.QueryRowContext(ctx, dismissSend, arg.UserID, arg.RequestID)
+	var i SendRequest
+	err := row.Scan(
+		&i.UserID,
+		&i.RequestID,
+		&i.State,
+		&i.MessageID,
+		&i.Room,
+		&i.Nick,
+		&i.Original,
+		&i.WireText,
+		&i.CreatedAt,
+		&i.EchoConsumed,
+		&i.OriginalMode,
+		&i.ErrorCode,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+		&i.PayloadPurged,
+		&i.Dismissed,
+	)
+	return i, err
+}
+
 const expireEchoes = `-- name: ExpireEchoes :many
-UPDATE send_requests SET state = 'unconfirmed', error_code = 'echo_timeout', updated_at = ? WHERE state = 'awaiting_echo' AND expires_at <= ? RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged
+UPDATE send_requests SET state = 'unconfirmed', error_code = 'echo_timeout', updated_at = ? WHERE state = 'awaiting_echo' AND expires_at <= ? RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged, dismissed
 `
 
 type ExpireEchoesParams struct {
@@ -343,6 +377,7 @@ func (q *Queries) ExpireEchoes(ctx context.Context, arg ExpireEchoesParams) ([]S
 			&i.UpdatedAt,
 			&i.ExpiresAt,
 			&i.PayloadPurged,
+			&i.Dismissed,
 		); err != nil {
 			return nil, err
 		}
@@ -358,7 +393,7 @@ func (q *Queries) ExpireEchoes(ctx context.Context, arg ExpireEchoesParams) ([]S
 }
 
 const finishSend = `-- name: FinishSend :one
-UPDATE send_requests SET state = ?, error_code = ?, updated_at = ?, expires_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged
+UPDATE send_requests SET state = ?, error_code = ?, updated_at = ?, expires_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged, dismissed
 `
 
 type FinishSendParams struct {
@@ -396,6 +431,7 @@ func (q *Queries) FinishSend(ctx context.Context, arg FinishSendParams) (SendReq
 		&i.UpdatedAt,
 		&i.ExpiresAt,
 		&i.PayloadPurged,
+		&i.Dismissed,
 	)
 	return i, err
 }
@@ -418,7 +454,7 @@ func (q *Queries) GetObserver(ctx context.Context) (Observer, error) {
 }
 
 const getSend = `-- name: GetSend :one
-SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged FROM send_requests WHERE user_id = ? AND request_id = ?
+SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged, dismissed FROM send_requests WHERE user_id = ? AND request_id = ?
 `
 
 type GetSendParams struct {
@@ -445,6 +481,7 @@ func (q *Queries) GetSend(ctx context.Context, arg GetSendParams) (SendRequest, 
 		&i.UpdatedAt,
 		&i.ExpiresAt,
 		&i.PayloadPurged,
+		&i.Dismissed,
 	)
 	return i, err
 }
@@ -477,7 +514,7 @@ func (q *Queries) InitializeUserIdentityPool(ctx context.Context, arg Initialize
 }
 
 const listSends = `-- name: ListSends :many
-SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged FROM send_requests WHERE user_id = ? AND room = ? AND payload_purged = 0 AND (state = 'confirmed' OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50
+SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged, dismissed FROM send_requests WHERE user_id = ? AND room = ? AND payload_purged = 0 AND dismissed = 0 AND (state IN ('confirmed','failed','unconfirmed') OR expires_at > ?) ORDER BY created_at DESC,rowid DESC LIMIT 50
 `
 
 type ListSendsParams struct {
@@ -511,6 +548,7 @@ func (q *Queries) ListSends(ctx context.Context, arg ListSendsParams) ([]SendReq
 			&i.UpdatedAt,
 			&i.ExpiresAt,
 			&i.PayloadPurged,
+			&i.Dismissed,
 		); err != nil {
 			return nil, err
 		}
@@ -567,7 +605,7 @@ func (q *Queries) Messages(ctx context.Context, arg MessagesParams) ([]Message, 
 }
 
 const pendingEcho = `-- name: PendingEcho :one
-SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged FROM send_requests WHERE room = ? AND nick = ? COLLATE NOCASE AND wire_text = ? AND payload_purged = 0 AND echo_consumed = 0 AND state IN ('sending','awaiting_echo','unconfirmed') AND created_at >= ? ORDER BY created_at,rowid LIMIT 1
+SELECT user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged, dismissed FROM send_requests WHERE room = ? AND nick = ? COLLATE NOCASE AND wire_text = ? AND payload_purged = 0 AND echo_consumed = 0 AND state IN ('sending','awaiting_echo','unconfirmed') AND created_at >= ? ORDER BY created_at,rowid LIMIT 1
 `
 
 type PendingEchoParams struct {
@@ -601,12 +639,13 @@ func (q *Queries) PendingEcho(ctx context.Context, arg PendingEchoParams) (SendR
 		&i.UpdatedAt,
 		&i.ExpiresAt,
 		&i.PayloadPurged,
+		&i.Dismissed,
 	)
 	return i, err
 }
 
 const prepareSend = `-- name: PrepareSend :one
-UPDATE send_requests SET wire_text = ?, state = 'sending', updated_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged
+UPDATE send_requests SET wire_text = ?, state = 'sending', updated_at = ? WHERE user_id = ? AND request_id = ? AND state IN ('translating','sending') RETURNING user_id, request_id, state, message_id, room, nick, original, wire_text, created_at, echo_consumed, original_mode, error_code, updated_at, expires_at, payload_purged, dismissed
 `
 
 type PrepareSendParams struct {
@@ -640,6 +679,7 @@ func (q *Queries) PrepareSend(ctx context.Context, arg PrepareSendParams) (SendR
 		&i.UpdatedAt,
 		&i.ExpiresAt,
 		&i.PayloadPurged,
+		&i.Dismissed,
 	)
 	return i, err
 }

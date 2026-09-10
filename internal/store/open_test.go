@@ -11,7 +11,7 @@ import (
 )
 
 func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
-	for _, version := range []int{1, 2, 3, 4, 5} {
+	for _, version := range []int{1, 2, 3, 4, 5, 6} {
 		t.Run(fmt.Sprintf("version%d", version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "legacy.sqlite")
 			legacy, err := sql.Open("sqlite", path)
@@ -65,6 +65,11 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 					t.Fatal(errors.Join(err, legacy.Close()))
 				}
 			}
+			if version >= 6 {
+				if _, err := legacy.Exec(migration6 + "\nPRAGMA user_version=6;"); err != nil {
+					t.Fatal(errors.Join(err, legacy.Close()))
+				}
+			}
 			if err := validateSchema(t.Context(), legacy, version); err != nil {
 				t.Fatal(errors.Join(err, legacy.Close()))
 			}
@@ -84,8 +89,8 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 			if err := db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&currentVersion); err != nil {
 				t.Fatal(err)
 			}
-			if currentVersion != 6 {
-				t.Fatalf("database version = %d, want 6", currentVersion)
+			if currentVersion != schemaVersion {
+				t.Fatalf("database version = %d, want %d", currentVersion, schemaVersion)
 			}
 			if err := validateSchema(t.Context(), db, currentVersion); err != nil {
 				t.Fatal(err)
@@ -212,7 +217,7 @@ func TestLegacyMigrationPreservesHistoryAndEchoOwnership(t *testing.T) {
 	}
 }
 
-func TestExpiredSendDisappearsWithoutReleasingIdempotencyClaim(t *testing.T) {
+func TestExpiredSendRemainsActionableWithoutReleasingIdempotencyClaim(t *testing.T) {
 	db, q, err := NewSQLite(t.Context(), filepath.Join(t.TempDir(), "chat.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -248,8 +253,8 @@ func TestExpiredSendDisappearsWithoutReleasingIdempotencyClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(visible) != 0 {
-		t.Fatalf("expired outgoing still visible: %+v", visible)
+	if len(visible) != 1 || visible[0].State != "unconfirmed" {
+		t.Fatalf("expired outgoing is not actionable: %+v", visible)
 	}
 	count, err := q.ClaimSend(t.Context(), claim)
 	if err != nil || count != 0 {

@@ -427,6 +427,9 @@ func validateSchema(ctx context.Context, db *sql.DB, version int) error {
 		columns["users"] += ",identity_pool"
 		columns["observer"] += ",identity_pool"
 	}
+	if version >= 7 {
+		columns["send_requests"] += ",dismissed"
+	}
 	for table, fields := range columns {
 		var kind string
 		if err := db.QueryRowContext(ctx, "SELECT type FROM sqlite_schema WHERE name = ?", table).Scan(&kind); err != nil {

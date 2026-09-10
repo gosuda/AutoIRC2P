@@ -38,6 +38,7 @@
   let outgoing = $state<Record<string, Outgoing>>({});
   let submitting = $state<Record<string, boolean>>({});
   let checking = $state<Record<string, boolean>>({});
+  let recovering = $state<Record<string, boolean>>({});
   let sendErrors = $state<Record<string, { message: string; expiresAt: number }>>({});
   let now = $state(Date.now());
   let reconnectVersion = $state(0);
@@ -52,7 +53,7 @@
   const autoTranslate = $derived(translationEnabled && autoTranslatePreference);
   const room = $derived(rooms.find((candidate) => candidate.name === roomName));
   const ready = $derived(!!user && subscription === 'live' && room?.sendState === 'ready');
-  const visibleOutgoing = $derived(Object.values(outgoing).filter((send) => send.room === roomName && (send.state === 'confirmed' || Date.parse(send.expiresAt) > now)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)));
+  const visibleOutgoing = $derived(Object.values(outgoing).filter((send) => send.room === roomName && !send.dismissed && (['confirmed', 'failed', 'unconfirmed'].includes(send.state) || Date.parse(send.expiresAt) > now)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)));
   const draft = $derived(drafts[roomName] ?? '');
   const busy = $derived(!!submitting[roomName] || visibleOutgoing.some((send) => send.original === draft && ['translating', 'sending', 'awaiting_echo'].includes(send.state)));
   const composeError = $derived((sendErrors[roomName]?.expiresAt ?? 0) > now ? sendErrors[roomName].message : '');
@@ -157,6 +158,7 @@
     sendErrors = {};
     submitting = {};
     checking = {};
+    recovering = {};
     locallySubmitted = new Set();
     subscription = 'connecting';
     historyLoading = true;
@@ -363,7 +365,7 @@
   }
 
   async function checkSend(send: Outgoing) {
-    if (checking[send.requestId]) return;
+    if (checking[send.requestId] || recovering[send.requestId]) return;
     const epoch = accountEpoch;
     checking = { ...checking, [send.requestId]: true };
     try {
@@ -376,29 +378,61 @@
     }
   }
 
+  async function recoverSend(send: Outgoing, retry: boolean) {
+    send = outgoing[send.requestId] ?? send;
+    if (!user || send.dismissed || !['failed', 'unconfirmed'].includes(send.state) || recovering[send.requestId] || checking[send.requestId] || submitting[send.room]) return;
+    if (retry && (subscription !== 'live' || rooms.find((candidate) => candidate.name === send.room)?.sendState !== 'ready')) {
+      setSendError(send.room, text.preparing);
+      return;
+    }
+    if (retry && send.state === 'unconfirmed' && !window.confirm(text.retryUnconfirmedWarning)) return;
+    const epoch = accountEpoch;
+    recovering = { ...recovering, [send.requestId]: true };
+    try {
+      try {
+        const result = await request<{ send: Outgoing }>(`/api/sends/${encodeURIComponent(send.requestId)}`, { method: 'DELETE', signal: accountController.signal });
+        if (epoch !== accountEpoch) return;
+        receiveSends([result.send]);
+      } catch (error) {
+        if (!(send.clientOnly && error instanceof APIError && error.status === 404)) throw error;
+        if (epoch !== accountEpoch) return;
+        receiveSends([{ ...send, dismissed: true }]);
+      }
+      if (retry) await submitMessage(send.room, send.original, send.originalMode);
+    } catch (error) {
+      if (epoch === accountEpoch) {
+        setSendError(send.room, error instanceof APIError && error.code === 'send_not_dismissible' ? text.sendChanged : text.deleteFailed);
+        active?.refresh();
+      }
+    } finally {
+      if (epoch === accountEpoch) recovering = { ...recovering, [send.requestId]: false };
+    }
+  }
+
   async function sendMessage(original: boolean) {
     if (!room || !ready || busy || !draft.trim()) return;
-    const selectedRoom = room.name;
-    const content = draft;
+    await submitMessage(room.name, draft, original || !autoTranslate);
+  }
+
+  async function submitMessage(selectedRoom: string, content: string, originalMode: boolean) {
     const epoch = accountEpoch;
     const requestId = crypto.randomUUID();
     const started = Date.now();
-    const provisional: Outgoing = { requestId, room: selectedRoom, original: content, state: 'unconfirmed', messageId: 0, createdAt: new Date(started).toISOString(), expiresAt: new Date(started + 120000).toISOString(), errorCode: 'send_unconfirmed' };
+    const provisional: Outgoing = { requestId, room: selectedRoom, original: content, originalMode, dismissed: false, clientOnly: true, state: 'unconfirmed', messageId: 0, createdAt: new Date(started).toISOString(), expiresAt: new Date(started + 120000).toISOString(), errorCode: 'send_unconfirmed' };
     locallySubmitted.add(requestId);
     submitting = { ...submitting, [selectedRoom]: true };
     sendErrors = { ...sendErrors, [selectedRoom]: { message: '', expiresAt: 0 } };
     try {
       const result = await request<{ send: Outgoing }>('/api/messages', {
         method: 'POST', signal: AbortSignal.any([accountController.signal, AbortSignal.timeout(120000)]),
-        body: JSON.stringify({ room: selectedRoom, text: content, original: original || !autoTranslate, requestId })
+        body: JSON.stringify({ room: selectedRoom, text: content, original: originalMode, requestId })
       });
       if (epoch === accountEpoch) receiveSends([result.send]);
     } catch (cause) {
       if (epoch !== accountEpoch) return;
-      submitting = { ...submitting, [selectedRoom]: false };
       if (cause instanceof APIError && cause.send) {
         receiveSends([cause.send]);
-      } else if (cause instanceof APIError && cause.status >= 400 && cause.status < 500) {
+      } else if (cause instanceof APIError && ['not_ready', 'invalid_message', 'login_required', 'rate_limited'].includes(cause.code)) {
         receiveSends([{ ...provisional, state: 'failed', errorCode: cause.code }]);
       } else {
         // A lost response cannot tell us whether the server wrote the message.
@@ -521,7 +555,7 @@
       <div class="workspace-loading" role="status"><span class="empty-mark" aria-hidden="true">a/</span><p>{restoring ? text.initializing : text.sessionError}</p></div>
     {:else if room}
       {#key `${roomName}:${language}:${user?.id ?? 'guest'}`}
-        <MessageFeed {language} {translationEnabled} {autoTranslate} {roomName} {messages} outgoing={visibleOutgoing} loading={historyLoading} error={historyError} {sendsError} {checking} onread={markRead} onretry={() => active?.refresh()} oncheck={(send) => void checkSend(send)} onrestore={(send) => { drafts = { ...drafts, [send.room]: send.original }; }} />
+        <MessageFeed {language} {translationEnabled} {autoTranslate} {roomName} {messages} outgoing={visibleOutgoing} loading={historyLoading} error={historyError} {sendsError} {checking} {recovering} {submitting} {ready} onread={markRead} onretry={() => active?.refresh()} oncheck={(send) => void checkSend(send)} onresend={(send) => void recoverSend(send, true)} ondelete={(send) => void recoverSend(send, false)} onrestore={(send) => { drafts = { ...drafts, [send.room]: send.original }; }} />
       {/key}
       {#key `${roomName}:${user?.id ?? 'guest'}`}
         <Composer {language} {translationEnabled} {autoTranslate} {room} {user} {draft} {ready} {busy} error={composeError} onlogin={() => { authMode = 'login'; }} ondraft={(value) => { drafts = { ...drafts, [roomName]: value }; }} onsend={(original) => void sendMessage(original)} />

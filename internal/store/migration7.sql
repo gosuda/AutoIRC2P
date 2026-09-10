@@ -1,0 +1,1 @@
+ALTER TABLE send_requests ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;

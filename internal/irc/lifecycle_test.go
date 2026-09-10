@@ -19,7 +19,7 @@ import (
 )
 
 type leaseEndpoint struct {
-	ivnp.DestinationEndpoint
+	destinationEndpoint
 	local   *foundation.LocalDestination
 	stream  net.Conn
 	closing chan struct{}
@@ -35,7 +35,7 @@ func (e *leaseEndpoint) WaitReady(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (e *leaseEndpoint) DialI2P(ctx context.Context, _ string) (net.Conn, error) {
+func (e *leaseEndpoint) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func pooledLeaseAccount(t *testing.T, id int64, nick string) Account {
 	return account
 }
 
-func leaseManager(t *testing.T, capacity int, create func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error)) *Manager {
+func leaseManager(t *testing.T, capacity int, create func(context.Context, ivnp.DestinationConfig) (destinationEndpoint, error)) *Manager {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	ready := make(chan struct{})
@@ -95,8 +95,8 @@ func leaseManager(t *testing.T, capacity int, create func(context.Context, ivnp.
 	return manager
 }
 
-func waitingEndpoint(spec ivnp.DestinationSpec) *leaseEndpoint {
-	return &leaseEndpoint{local: spec.Local, closing: make(chan struct{}), closed: make(chan struct{})}
+func waitingEndpoint(spec ivnp.DestinationConfig) *leaseEndpoint {
+	return &leaseEndpoint{local: spec.Identity, closing: make(chan struct{}), closed: make(chan struct{})}
 }
 
 func assertEndpointOpen(t *testing.T, endpoint *leaseEndpoint) {
@@ -112,7 +112,7 @@ func TestAccountLeasesPreserveIdentityAcrossGraceAndReplacement(t *testing.T) {
 	account := leaseAccount(t, 1, "alice")
 	synctest.Test(t, func(t *testing.T) {
 		created := make(chan *leaseEndpoint, 4)
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := waitingEndpoint(spec)
 			created <- endpoint
 			return endpoint, nil
@@ -176,7 +176,7 @@ func TestAccountClosingKeepsCapacityAndAllowsCancelableReacquisition(t *testing.
 		drain := make(chan struct{})
 		var drainOnce sync.Once
 		unblock := func() { drainOnce.Do(func() { close(drain) }) }
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := waitingEndpoint(spec)
 			endpoint.drain = drain
 			created <- endpoint
@@ -249,7 +249,7 @@ func TestObserverIsPinnedOutsideRegisteredAccountCapacity(t *testing.T) {
 	other := leaseAccount(t, 2, "bob")
 	synctest.Test(t, func(t *testing.T) {
 		created := make(chan *leaseEndpoint, 4)
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := waitingEndpoint(spec)
 			created <- endpoint
 			return endpoint, nil
@@ -302,7 +302,7 @@ func TestAccountGraceClosesStreamAndCancelsPendingJoins(t *testing.T) {
 		client, peer := net.Pipe()
 		t.Cleanup(func() { _ = peer.Close() })
 		created := make(chan *leaseEndpoint, 1)
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := waitingEndpoint(spec)
 			endpoint.stream = client
 			created <- endpoint
@@ -350,7 +350,7 @@ func TestAccountGraceClosesStreamAndCancelsPendingJoins(t *testing.T) {
 func TestAccountExpiryCancelsRouterStartupWait(t *testing.T) {
 	account := leaseAccount(t, 1, "alice")
 	synctest.Test(t, func(t *testing.T) {
-		manager := leaseManager(t, 1, func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(context.Context, ivnp.DestinationConfig) (destinationEndpoint, error) {
 			t.Error("created a destination before the router was ready")
 			return nil, net.ErrClosed
 		})
@@ -382,7 +382,7 @@ func TestShutdownCancelsBlockedAccountSend(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, peer := net.Pipe()
 		t.Cleanup(func() { _ = peer.Close() })
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := waitingEndpoint(spec)
 			endpoint.stream = client
 			return endpoint, nil
@@ -436,7 +436,7 @@ func TestPoolGraceExpiryReleasesEveryDestination(t *testing.T) {
 	account := pooledLeaseAccount(t, 1, "alice")
 	synctest.Test(t, func(t *testing.T) {
 		created := make(chan *leaseEndpoint, DestinationPoolSize)
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := waitingEndpoint(spec)
 			created <- endpoint
 			return endpoint, nil
@@ -445,10 +445,13 @@ func TestPoolGraceExpiryReleasesEveryDestination(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		endpoints := make([]*leaseEndpoint, DestinationPoolSize)
-		for i := range endpoints {
-			endpoints[i] = <-created
-			if endpoints[i].local.B32() != account.identityAt(i).Address {
+		endpoints := make(map[string]*leaseEndpoint, DestinationPoolSize)
+		for range DestinationPoolSize {
+			endpoint := <-created
+			endpoints[endpoint.local.B32()] = endpoint
+		}
+		for i := range DestinationPoolSize {
+			if endpoints[account.identityAt(i).Address] == nil {
 				t.Fatalf("pool slot %d lost its persisted identity", i)
 			}
 		}
@@ -457,9 +460,9 @@ func TestPoolGraceExpiryReleasesEveryDestination(t *testing.T) {
 			<-endpoint.closed
 		}
 		synctest.Wait()
-		for i, endpoint := range endpoints {
+		for address, endpoint := range endpoints {
 			if _, err := endpoint.local.Sign([]byte("expired pool")); err == nil {
-				t.Errorf("expired pool slot %d still owns private keys", i)
+				t.Errorf("expired pool identity %s still owns private keys", address)
 			}
 		}
 		if _, err := manager.Retain(t.Context(), account.ID); !errors.Is(err, ErrNotConnected) {
@@ -481,7 +484,7 @@ func TestAdmissionRejectsDuplicateAndOversizedDestinationPools(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				manager := leaseManager(t, 1, func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+				manager := leaseManager(t, 1, func(context.Context, ivnp.DestinationConfig) (destinationEndpoint, error) {
 					t.Error("invalid pool created an endpoint")
 					return nil, net.ErrClosed
 				})
@@ -502,7 +505,7 @@ func TestAdmissionKeepsAccountAndObserverPoolsDisjoint(t *testing.T) {
 	observer := pooledLeaseAccount(t, 0, "observer")
 	account := pooledLeaseAccount(t, 1, "alice")
 	synctest.Test(t, func(t *testing.T) {
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			return waitingEndpoint(spec), nil
 		})
 		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
@@ -547,7 +550,7 @@ func TestAdmissionRejectsUnrestorableAlternateWithoutReservingCapacity(t *testin
 	account := pooledLeaseAccount(t, 1, "alice")
 	synctest.Test(t, func(t *testing.T) {
 		created := make(chan *leaseEndpoint, DestinationPoolSize)
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := waitingEndpoint(spec)
 			created <- endpoint
 			return endpoint, nil
@@ -583,7 +586,7 @@ func TestManagerRejectsInsufficientDestinationCapacity(t *testing.T) {
 		capacity    int
 		maxAccounts int
 	}{
-		{name: "default accounts exceed configured capacity", capacity: 51},
+		{name: "default accounts exceed configured capacity", capacity: 50},
 		{name: "account limit cannot overflow pool budget", capacity: 64, maxAccounts: int(^uint(0) >> 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

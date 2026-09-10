@@ -70,7 +70,7 @@ type Manager struct {
 	router              *routerRuntime
 	newRouter           func() (*routerRuntime, error)
 	routerReady         bool
-	createDestination   func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error)
+	createDestination   func(context.Context, ivnp.DestinationConfig) (destinationEndpoint, error)
 	destinationCapacity int
 	onEvent             func(Event)
 	rooms               map[string]string
@@ -134,7 +134,7 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	if cfg.MaxAccounts == 0 {
 		cfg.MaxAccounts = 16
 	}
-	if cfg.MaxAccounts > (maxRouterDestinations-1)/DestinationPoolSize-1 {
+	if cfg.MaxAccounts > maxRouterDestinations/DestinationPoolSize-1 {
 		return nil, fmt.Errorf("IRC account limit exceeds %d-destination pool capacity: %w", maxRouterDestinations, errInvalidConfig)
 	}
 	if cfg.AccountIdleGrace == 0 {
@@ -150,13 +150,13 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 		}
 		rooms[fold(room)] = room
 	}
-	destinationCapacity := min((cfg.MaxAccounts+1)*DestinationPoolSize+1+prewarmCapacity, maxRouterDestinations)
+	destinationCapacity := min((cfg.MaxAccounts+1)*DestinationPoolSize+prewarmCapacity, maxRouterDestinations)
 	configuration, err := loadRouterConfig(cfg.ConfigPath, destinationCapacity)
 	if err != nil {
 		return nil, fmt.Errorf("load IVNP configuration: %w", err)
 	}
 	// Unclaimed warmups yield capacity to active account pools.
-	maxAccounts := (configuration.State.MaxDestinations-1)/DestinationPoolSize - 1
+	maxAccounts := configuration.State.MaxDestinations/DestinationPoolSize - 1
 	if cfg.MaxAccounts > maxAccounts {
 		return nil, fmt.Errorf("IRC MaxAccounts=%d with %d destinations per account and observer exceeds IVNP state.max_destinations=%d (maximum IRC MaxAccounts=%d): %w", cfg.MaxAccounts, DestinationPoolSize, configuration.State.MaxDestinations, max(0, maxAccounts), errInvalidConfig)
 	}
@@ -436,18 +436,33 @@ func (m *Manager) runAccount(state *accountConnection) {
 		return
 	case <-ready:
 	}
-	// Creation starts tunnel maintenance for every slot, without opening IRC sockets.
+	// Root construction waits for publication. Build slots concurrently so a slow
+	// alternate cannot delay the selected destination's first IRC connection.
+	initial := make([]chan struct{}, len(state.destinations))
+	var creating sync.WaitGroup
+	defer creating.Wait()
 	for i := range state.destinations {
-		if state.ctx.Err() != nil {
-			return
-		}
 		slot := &state.destinations[i]
-		if slot.endpoint == nil {
-			slot.creationErr = m.createAccountDestination(state, slot)
+		if slot.endpoint != nil {
+			continue
 		}
+		done := make(chan struct{})
+		initial[i] = done
+		creating.Go(func() {
+			defer close(done)
+			slot.creationErr = m.createAccountDestination(state, slot)
+		})
 	}
 	selected := 0
 	for state.ctx.Err() == nil {
+		if done := initial[selected]; done != nil {
+			select {
+			case <-state.ctx.Done():
+				return
+			case <-done:
+			}
+			initial[selected] = nil
+		}
 		slot := &state.destinations[selected]
 		err := slot.creationErr
 		slot.creationErr = nil
@@ -459,7 +474,7 @@ func (m *Manager) runAccount(state *accountConnection) {
 		if err == nil && !slot.ready {
 			stage = "destination readiness"
 			m.status(state.account.ID, "connecting", "Waiting for I2P destination tunnels")
-			if ready, ok := slot.endpoint.(ivnp.ReadyDestinationEndpoint); ok {
+			if ready, ok := slot.endpoint.(destinationReadiness); ok {
 				readyCtx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
 				err = ready.WaitReady(readyCtx)
 				cancel()

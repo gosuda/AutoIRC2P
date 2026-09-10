@@ -39,6 +39,7 @@ type SendRequest struct {
 	UpdatedAt     int64  `json:"updated_at"`
 	ExpiresAt     int64  `json:"expires_at"`
 	PayloadPurged int64  `json:"payload_purged"`
+	Dismissed     int64  `json:"dismissed"`
 }
 
 type Session struct {

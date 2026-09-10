@@ -25,9 +25,9 @@ func (e *warmupEndpoint) WaitReady(ctx context.Context) error {
 	return err
 }
 
-func newWarmupEndpoint(spec ivnp.DestinationSpec, attempts chan<- recoveryAttempt) *warmupEndpoint {
+func newWarmupEndpoint(spec ivnp.DestinationConfig, attempts chan<- recoveryAttempt) *warmupEndpoint {
 	return &warmupEndpoint{
-		recoveryEndpoint: &recoveryEndpoint{local: spec.Local, attempts: attempts, closed: make(chan struct{})},
+		recoveryEndpoint: &recoveryEndpoint{local: spec.Identity, attempts: attempts, closed: make(chan struct{})},
 		ready:            make(chan struct{}),
 	}
 }
@@ -49,7 +49,7 @@ func TestPrewarmTransfersReadyPrimaryWithoutOpeningIRC(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		attempts := make(chan recoveryAttempt, 1)
 		created := make(chan *warmupEndpoint, DestinationPoolSize)
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := newWarmupEndpoint(spec, attempts)
 			created <- endpoint
 			return endpoint, nil
@@ -80,12 +80,16 @@ func TestPrewarmTransfersReadyPrimaryWithoutOpeningIRC(t *testing.T) {
 			t.Fatal("login dialed a different destination instead of the warmed primary")
 		}
 		endpoints := []*warmupEndpoint{primary}
-		for _, identity := range account.Alternates {
+		alternates := make(map[string]*warmupEndpoint, len(account.Alternates))
+		for range account.Alternates {
 			endpoint := <-created
-			if endpoint.local.B32() != identity.Address {
-				t.Fatalf("alternate identity = %s, want %s", endpoint.local.B32(), identity.Address)
-			}
+			alternates[endpoint.local.B32()] = endpoint
 			endpoints = append(endpoints, endpoint)
+		}
+		for _, identity := range account.Alternates {
+			if alternates[identity.Address] == nil {
+				t.Fatalf("persisted alternate %s was not created", identity.Address)
+			}
 		}
 		if err := manager.Close(); err != nil {
 			t.Fatal(err)
@@ -102,7 +106,7 @@ func TestPrewarmTransfersWhileCreationIsInFlight(t *testing.T) {
 		attempts := make(chan recoveryAttempt, 1)
 		created := make(chan *warmupEndpoint, 2)
 		creationGate := make(chan struct{})
-		manager := leaseManager(t, 1, func(ctx context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(ctx context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := newWarmupEndpoint(spec, attempts)
 			created <- endpoint
 			select {
@@ -159,7 +163,7 @@ func TestPrewarmReservesTwoIsolatedIdentitiesWithoutBlockingColdAccounts(t *test
 	synctest.Test(t, func(t *testing.T) {
 		attempts := make(chan recoveryAttempt, 1)
 		created := make(chan *warmupEndpoint, 3)
-		manager := leaseManager(t, 3, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 3, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := newWarmupEndpoint(spec, attempts)
 			created <- endpoint
 			return endpoint, nil
@@ -205,7 +209,7 @@ func TestPrewarmIdentityChangeDiscardsStaleDestination(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		attempts := make(chan recoveryAttempt, 1)
 		created := make(chan *warmupEndpoint, 2)
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := newWarmupEndpoint(spec, attempts)
 			created <- endpoint
 			return endpoint, nil
@@ -237,8 +241,8 @@ func TestActiveAccountEvictsWarmupsBeforeExceedingDestinationCapacity(t *testing
 		attempts := make(chan recoveryAttempt, 1)
 		created := make(chan *warmupEndpoint, DestinationPoolSize)
 		var warmups []*warmupEndpoint
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
-			if spec.Local.B32() == cold.Identity.Address {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
+			if spec.Identity.B32() == cold.Identity.Address {
 				for _, warm := range warmups {
 					assertWarmupReleased(t, warm)
 				}
@@ -247,7 +251,7 @@ func TestActiveAccountEvictsWarmupsBeforeExceedingDestinationCapacity(t *testing
 			created <- endpoint
 			return endpoint, nil
 		})
-		manager.destinationCapacity = DestinationPoolSize + 1
+		manager.destinationCapacity = DestinationPoolSize
 		for _, account := range []Account{first, second} {
 			if err := manager.Prewarm(t.Context(), account); err != nil {
 				t.Fatal(err)
@@ -274,7 +278,7 @@ func TestPrewarmCancellationReleasesUnclaimedDestination(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				created := make(chan *warmupEndpoint, 1)
-				manager := leaseManager(t, 1, func(ctx context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+				manager := leaseManager(t, 1, func(ctx context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 					endpoint := newWarmupEndpoint(spec, make(chan recoveryAttempt, 1))
 					if phase == "readiness" {
 						endpoint.readiness = make(chan struct{})
@@ -308,7 +312,7 @@ func TestPrewarmCancellationBeforeRouterReadinessCreatesNothing(t *testing.T) {
 	account := leaseAccount(t, 1, "alice")
 	synctest.Test(t, func(t *testing.T) {
 		created := make(chan *warmupEndpoint, 1)
-		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := newWarmupEndpoint(spec, make(chan recoveryAttempt, 1))
 			created <- endpoint
 			return endpoint, nil
@@ -349,7 +353,7 @@ func TestFailedPrewarmFallsBackToFreshAccountDestination(t *testing.T) {
 				created := make(chan *warmupEndpoint, 2)
 				failure := errors.New("destination unavailable")
 				first := true
-				manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+				manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 					endpoint := newWarmupEndpoint(spec, attempts)
 					var err error
 					if first {
@@ -391,14 +395,18 @@ func TestRouterRestartDiscardsUnclaimedWarmDestination(t *testing.T) {
 		first, second := newRecoveryNode(), newRecoveryNode()
 		attempts := make(chan recoveryAttempt, 1)
 		created := make(chan *warmupEndpoint, 2)
-		create := func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+		create := func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 			endpoint := newWarmupEndpoint(spec, attempts)
 			created <- endpoint
 			return endpoint, nil
 		}
 		oldRuntime, newRuntime := first.runtime(), second.runtime()
 		oldRuntime.createDestination, newRuntime.createDestination = create, create
-		manager := recoveryManager(t, oldRuntime, func() (*routerRuntime, error) { return newRuntime, nil })
+		rebuilt := make(chan struct{})
+		manager := recoveryManager(t, oldRuntime, func() (*routerRuntime, error) {
+			close(rebuilt)
+			return newRuntime, nil
+		})
 		if err := manager.Start(t.Context()); err != nil {
 			t.Fatal(err)
 		}
@@ -410,8 +418,12 @@ func TestRouterRestartDiscardsUnclaimedWarmDestination(t *testing.T) {
 		if err := first.Close(); err != nil {
 			t.Fatal(err)
 		}
-		<-second.started
+		<-rebuilt
 		synctest.Wait()
+		manager.mu.Lock()
+		ready := manager.ready
+		manager.mu.Unlock()
+		<-ready
 		assertWarmupReleased(t, old)
 		if err := manager.Prewarm(t.Context(), account); err != nil {
 			t.Fatal(err)

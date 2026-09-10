@@ -16,18 +16,20 @@ import (
 )
 
 type Outgoing struct {
-	RequestID string `json:"requestId"`
-	Room      string `json:"room"`
-	Original  string `json:"original"`
-	State     string `json:"state"`
-	MessageID int64  `json:"messageId"`
-	CreatedAt string `json:"createdAt"`
-	ExpiresAt string `json:"expiresAt"`
-	ErrorCode string `json:"errorCode"`
+	RequestID    string `json:"requestId"`
+	Room         string `json:"room"`
+	Original     string `json:"original"`
+	OriginalMode bool   `json:"originalMode"`
+	Dismissed    bool   `json:"dismissed"`
+	State        string `json:"state"`
+	MessageID    int64  `json:"messageId"`
+	CreatedAt    string `json:"createdAt"`
+	ExpiresAt    string `json:"expiresAt"`
+	ErrorCode    string `json:"errorCode"`
 }
 
 func outgoingFrom(row store.SendRequest) Outgoing {
-	return Outgoing{RequestID: row.RequestID, Room: row.Room, Original: row.Original, State: row.State, MessageID: row.MessageID, CreatedAt: time.UnixMilli(row.CreatedAt).UTC().Format(time.RFC3339Nano), ExpiresAt: time.UnixMilli(row.ExpiresAt).UTC().Format(time.RFC3339Nano), ErrorCode: row.ErrorCode}
+	return Outgoing{RequestID: row.RequestID, Room: row.Room, Original: row.Original, OriginalMode: row.OriginalMode != 0, Dismissed: row.Dismissed != 0, State: row.State, MessageID: row.MessageID, CreatedAt: time.UnixMilli(row.CreatedAt).UTC().Format(time.RFC3339Nano), ExpiresAt: time.UnixMilli(row.ExpiresAt).UTC().Format(time.RFC3339Nano), ErrorCode: row.ErrorCode}
 }
 
 func (s *Server) publishSend(row store.SendRequest) {
@@ -93,6 +95,35 @@ func (s *Server) sendStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"send": outgoingFrom(row)})
+}
+
+func (s *Server) dismissSend(w http.ResponseWriter, r *http.Request) {
+	user, err := s.currentUser(r)
+	if err != nil {
+		sendError(w, http.StatusUnauthorized, "login_required", nil)
+		return
+	}
+	id := httprouter.ParamsFromContext(r.Context()).ByName("requestId")
+	s.outgoingMu.Lock()
+	defer s.outgoingMu.Unlock()
+	row, err := s.q.DismissSend(r.Context(), store.DismissSendParams{UserID: user.ID, RequestID: id})
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = s.q.GetSend(r.Context(), store.GetSendParams{UserID: user.ID, RequestID: id})
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "send not found")
+			return
+		}
+		if err == nil {
+			sendError(w, http.StatusConflict, "send_not_dismissible", nil)
+			return
+		}
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "send deletion unavailable")
+		return
+	}
+	s.publishSend(row)
+	writeJSON(w, http.StatusOK, map[string]any{"send": outgoingFrom(row)})
 }
 
 func sendError(w http.ResponseWriter, status int, code string, row *store.SendRequest) {

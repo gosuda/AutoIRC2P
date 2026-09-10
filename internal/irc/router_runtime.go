@@ -4,70 +4,94 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/client"
+	"gosuda.org/ivnp/state"
 )
 
-var errRouterStopped = errors.New("embedded I2P router stopped unexpectedly")
+type destinationEndpoint interface {
+	DialContext(context.Context, string, string) (net.Conn, error)
+	Close() error
+}
+
+type destinationReadiness interface {
+	WaitReady(context.Context) error
+}
 
 type routerNode interface {
-	Start(context.Context) error
+	WaitReady(context.Context) error
 	Close() error
-	Wait() error
 }
 
 type routerRuntime struct {
 	node              routerNode
+	open              func(context.Context) (routerNode, error)
 	addressBook       *client.AddressBookService
-	createDestination func(context.Context, ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error)
+	createDestination func(context.Context, ivnp.DestinationConfig) (destinationEndpoint, error)
 }
 
-func openRouterRuntime(configuration ivnp.Config) (*routerRuntime, error) {
+func openRouterRuntime(configuration state.ConfigurationOperating) (*routerRuntime, error) {
+	cfg, tunnels, err := embeddedRouterConfig(configuration)
+	if err != nil {
+		return nil, err
+	}
 	addressBook, err := newAddressBook(configuration)
 	if err != nil {
 		return nil, fmt.Errorf("open I2P addressbook: %w", err)
 	}
-	// Account endpoints share this resolver, not the node's subscription writer.
-	configuration.AddressBook.Enabled = false
-	configuration.SAM.Enabled = false
-	configuration.HTTPProxy.Enabled = false
-	configuration.SOCKS5.Enabled = false
-	configuration.Control.Enabled = false
-	configuration.Metrics.Enabled = false
-	node, err := ivnp.New(configuration, ivnp.Options{})
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("open embedded IVNP router: %w", err), addressBook.Close(), addressBook.Wait())
+	runtime := &routerRuntime{addressBook: addressBook}
+	runtime.open = func(ctx context.Context) (routerNode, error) {
+		router, err := ivnp.NewRouter(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("open embedded I2P router (existing state must be compatible with IVNP's root API; no state was removed): %w", err)
+		}
+		runtime.createDestination = func(ctx context.Context, supplied ivnp.DestinationConfig) (destinationEndpoint, error) {
+			destination := ivnp.DefaultDestinationConfig()
+			destination.Identity = supplied.Identity
+			destination.Tunnels = tunnels
+			endpoint, err := router.NewDestination(ctx, destination)
+			if err != nil {
+				return nil, err
+			}
+			return endpoint, nil
+		}
+		return router, nil
 	}
-	return &routerRuntime{node: node, addressBook: addressBook, createDestination: node.DestinationController().CreateDestination}, nil
+	return runtime, nil
 }
 
 func (r *routerRuntime) start(ctx context.Context) error {
-	if err := r.node.Start(ctx); err != nil {
-		return fmt.Errorf("start embedded I2P router: %w", err)
+	if r.node == nil {
+		node, err := r.open(ctx)
+		if err != nil {
+			return err
+		}
+		r.node = node
 	}
-	if r.addressBook == nil {
-		return nil
+	if r.addressBook != nil {
+		if err := r.addressBook.Start(ctx); err != nil {
+			return fmt.Errorf("start I2P addressbook: %w", err)
+		}
 	}
-	if err := r.addressBook.Start(ctx); err != nil {
-		return fmt.Errorf("start I2P addressbook: %w", err)
-	}
-	return nil
-}
-
-func (r *routerRuntime) closeResources() error {
-	return errors.Join(r.addressBook.Close(), r.node.Close())
+	return r.node.WaitReady(ctx)
 }
 
 func (r *routerRuntime) close() error {
 	if r == nil {
 		return nil
 	}
-	return errors.Join(r.closeResources(), r.addressBook.Wait(), r.node.Wait())
+	var nodeErr error
+	if r.node != nil {
+		nodeErr = r.node.Close()
+	}
+	return errors.Join(r.addressBook.Close(), r.addressBook.Wait(), nodeErr)
 }
 
-// IVNP repeats the same operational error in the joined Close/Wait results.
+// IVNP can return the recovered operational error again while closing resources.
 func routerCleanupError(err, recovered error) error {
 	if err == nil || errors.Is(recovered, err) {
 		return nil
@@ -76,9 +100,8 @@ func routerCleanupError(err, recovered error) error {
 	if !ok {
 		return err
 	}
-	causes := joined.Unwrap()
-	remaining := make([]error, 0, len(causes))
-	for _, cause := range causes {
+	var remaining []error
+	for _, cause := range joined.Unwrap() {
 		if cleanupErr := routerCleanupError(cause, recovered); cleanupErr != nil {
 			remaining = append(remaining, cleanupErr)
 		}
@@ -90,8 +113,6 @@ func (m *Manager) runRouter() {
 	m.mu.Lock()
 	runtime := m.router
 	m.mu.Unlock()
-	var nodeDone chan struct{}
-	var nodeWaitErr error
 	var runtimeFailure error
 	closeRuntime := func(recovered error) error {
 		if runtime == nil {
@@ -109,22 +130,13 @@ func (m *Manager) runRouter() {
 		for _, warm := range warmups {
 			<-warm.done
 		}
-		cleanupErr := errors.Join(runtime.closeResources(), runtime.addressBook.Wait())
-		if nodeDone != nil {
-			<-nodeDone
-		} else {
-			nodeWaitErr = runtime.node.Wait()
-		}
-		cleanupErr = errors.Join(cleanupErr, nodeWaitErr)
-		if recovered != nil {
-			cleanupErr = routerCleanupError(cleanupErr, recovered)
-		}
+		cleanupErr := routerCleanupError(runtime.close(), recovered)
 		m.mu.Lock()
 		if m.closeErr == nil {
 			m.closeErr = cleanupErr
 		}
 		m.mu.Unlock()
-		runtime, nodeDone, nodeWaitErr = nil, nil, nil
+		runtime = nil
 		runtimeFailure = nil
 		return cleanupErr
 	}
@@ -155,13 +167,6 @@ func (m *Manager) runRouter() {
 		if err == nil {
 			err = runtime.start(m.ctx)
 		}
-		if err == nil {
-			nodeDone = make(chan struct{})
-			go func() {
-				defer close(nodeDone)
-				nodeWaitErr = runtime.node.Wait()
-			}()
-		}
 		if err == nil && m.ctx.Err() == nil {
 			m.mu.Lock()
 			if m.closed || m.ctx.Err() != nil {
@@ -175,12 +180,13 @@ func (m *Manager) runRouter() {
 				close(m.ready)
 			}
 			m.mu.Unlock()
-			m.status(0, "connecting", "I2P router started; building anonymous tunnels")
-			select {
-			case <-m.ctx.Done():
-				return
-			case <-nodeDone:
-				err = errors.Join(errRouterStopped, nodeWaitErr)
+			m.status(0, "connecting", "I2P router ready; building account tunnels")
+			// The root API has no Wait method. Readiness reports terminal router closure;
+			// loss of tunnels waits for recovery rather than replacing a live router.
+			for pause(m.ctx, time.Second) {
+				if err = runtime.node.WaitReady(m.ctx); err != nil {
+					break
+				}
 			}
 		}
 		runtimeFailure = err
@@ -190,14 +196,14 @@ func (m *Manager) runRouter() {
 		err = errors.Join(err, closeRuntime(err))
 		event := log.Warn().Err(err)
 		event.Dur("retry_in_ms", reconnectDelay).Msg("Embedded I2P router unavailable")
-		m.onEvent(Event{AccountID: 0, State: "connecting", Text: "Embedded I2P router unavailable; retrying in " + reconnectDelay.String(), Service: true, Kind: "status"})
+		m.onEvent(Event{AccountID: 0, State: "connecting", Text: fmt.Sprintf("Embedded I2P router unavailable: %v; retrying in %s", err, reconnectDelay), Service: true, Kind: "status"})
 		if !pause(m.ctx, reconnectDelay) {
 			return
 		}
 	}
 }
 
-func (m *Manager) createRouterDestination(ctx context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
+func (m *Manager) createRouterDestination(ctx context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
 	m.mu.Lock()
 	if err := m.admissionErrorLocked(ctx); err != nil {
 		m.mu.Unlock()
@@ -209,6 +215,5 @@ func (m *Manager) createRouterDestination(ctx context.Context, spec ivnp.Destina
 	if !ready || runtime == nil {
 		return nil, ErrNotStarted
 	}
-	// The SDK serializes creation against Close and retires admitted endpoints.
 	return runtime.createDestination(ctx, spec)
 }

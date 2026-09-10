@@ -103,9 +103,9 @@ func (m *Manager) runPrewarm(warm *warmDestination) {
 	case <-warm.routerReady:
 	}
 	readyCtx, cancel := context.WithTimeout(warm.ctx, 5*time.Minute)
-	warm.slot.endpoint, err = m.createDestination(readyCtx, ivnp.DestinationSpec{Local: warm.slot.local})
+	warm.slot.endpoint, err = m.createDestination(readyCtx, ivnp.DestinationConfig{Identity: warm.slot.local})
 	if err == nil {
-		if endpoint, ok := warm.slot.endpoint.(ivnp.ReadyDestinationEndpoint); ok {
+		if endpoint, ok := warm.slot.endpoint.(destinationReadiness); ok {
 			err = endpoint.WaitReady(readyCtx)
 		} else {
 			err = errNoReadiness
@@ -208,7 +208,7 @@ func (m *Manager) cancelWarmDestinationsLocked() []*warmDestination {
 }
 
 func (m *Manager) reservedDestinationsLocked() int {
-	reserved := 1 + len(m.warm)
+	reserved := len(m.warm)
 	for _, state := range m.accounts {
 		reserved += len(state.destinations)
 	}

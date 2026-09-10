@@ -413,6 +413,7 @@ func (s *Server) Handler() http.Handler {
 	router.HandlerFunc(http.MethodGet, "/api/rooms", s.rooms)
 	router.HandlerFunc(http.MethodGet, "/api/sends", s.sends)
 	router.HandlerFunc(http.MethodGet, "/api/sends/:requestId", s.sendStatus)
+	router.HandlerFunc(http.MethodDelete, "/api/sends/:requestId", s.dismissSend)
 	router.HandlerFunc(http.MethodGet, "/api/ws", s.websocket)
 	router.HandlerFunc(http.MethodGet, "/api/health", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	router.NotFound = http.HandlerFunc(s.static)

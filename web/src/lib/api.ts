@@ -13,6 +13,9 @@ export type Outgoing = {
   requestId: string;
   room: string;
   original: string;
+  originalMode: boolean;
+  dismissed: boolean;
+  clientOnly?: boolean;
   state: 'translating' | 'sending' | 'awaiting_echo' | 'confirmed' | 'failed' | 'unconfirmed';
   messageId: number;
   createdAt: string;
@@ -127,6 +130,7 @@ export function messageKey(message: Message): number | string {
 
 export function mergeOutgoing(previous: Outgoing | undefined, incoming: Outgoing): Outgoing {
   if (!previous) return incoming;
+  if (previous.dismissed && !incoming.dismissed) incoming = { ...incoming, dismissed: true };
   const rank: Record<Outgoing['state'], number> = { translating: 0, sending: 1, awaiting_echo: 2, failed: 3, unconfirmed: 3, confirmed: 4 };
   return rank[incoming.state] < rank[previous.state] ? previous : incoming;
 }

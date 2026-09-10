@@ -27,7 +27,7 @@ type recoveryAttempt struct {
 }
 
 type recoveryEndpoint struct {
-	ivnp.DestinationEndpoint
+	destinationEndpoint
 	local       *foundation.LocalDestination
 	attempts    chan<- recoveryAttempt
 	mu          sync.Mutex
@@ -53,7 +53,7 @@ func (e *recoveryEndpoint) WaitReady(ctx context.Context) error {
 	return errors.Join(ctx.Err(), failure)
 }
 
-func (e *recoveryEndpoint) DialI2P(ctx context.Context, _ string) (net.Conn, error) {
+func (e *recoveryEndpoint) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	e.mu.Lock()
 	if err := errors.Join(ctx.Err(), e.failure, e.dialFailure); err != nil {
 		e.mu.Unlock()
@@ -109,8 +109,8 @@ func (events *recoveryEvents) statusCount(state string) int {
 func newRecoveryManager(t *testing.T) (*Manager, chan recoveryAttempt, *recoveryEvents) {
 	t.Helper()
 	attempts := make(chan recoveryAttempt, 8)
-	manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
-		return &recoveryEndpoint{local: spec.Local, attempts: attempts, closed: make(chan struct{})}, nil
+	manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
+		return &recoveryEndpoint{local: spec.Identity, attempts: attempts, closed: make(chan struct{})}, nil
 	})
 	manager.cfg.Rooms = []string{"#first"}
 	events := &recoveryEvents{}
@@ -477,10 +477,10 @@ func TestReconnectRotatesMaintainedDestinationsBeforeReuse(t *testing.T) {
 	account := pooledLeaseAccount(t, 1, "alice")
 	synctest.Test(t, func(t *testing.T) {
 		manager, attempts, _ := newRecoveryManager(t)
-		var endpoints []*recoveryEndpoint
-		manager.createDestination = func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
-			endpoint := &recoveryEndpoint{local: spec.Local, attempts: attempts, closed: make(chan struct{})}
-			endpoints = append(endpoints, endpoint)
+		created := make(chan *recoveryEndpoint, DestinationPoolSize)
+		manager.createDestination = func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
+			endpoint := &recoveryEndpoint{local: spec.Identity, attempts: attempts, closed: make(chan struct{})}
+			created <- endpoint
 			return endpoint, nil
 		}
 		release, err := manager.Acquire(t.Context(), account)
@@ -490,8 +490,10 @@ func TestReconnectRotatesMaintainedDestinationsBeforeReuse(t *testing.T) {
 		defer release()
 		account.ReleaseSensitive()
 		first := receiveRecoveryAttempt(t, attempts, account)
-		if len(endpoints) != DestinationPoolSize {
-			t.Fatalf("maintained destinations before first IRC dial = %d, want %d", len(endpoints), DestinationPoolSize)
+		endpoints := make(map[string]*recoveryEndpoint, DestinationPoolSize)
+		for range DestinationPoolSize {
+			endpoint := <-created
+			endpoints[endpoint.local.B32()] = endpoint
 		}
 		current := first
 		for _, selected := range []int{1, 2, 0, 1} {
@@ -514,21 +516,21 @@ func TestReconnectRotatesMaintainedDestinationsBeforeReuse(t *testing.T) {
 			if _, err := previous.reader.ReadString('\n'); err == nil {
 				t.Fatal("previous IRC socket remained open after reconnect")
 			}
-			if current.endpoint != endpoints[selected] || len(endpoints) != DestinationPoolSize {
+			if current.endpoint != endpoints[account.identityAt(selected).Address] {
 				t.Fatalf("slot %d recreated a maintained destination", selected)
 			}
 		}
 		if err := manager.Close(); err != nil {
 			t.Fatal(err)
 		}
-		for i, endpoint := range endpoints {
+		for address, endpoint := range endpoints {
 			select {
 			case <-endpoint.closed:
 			default:
-				t.Errorf("shutdown left destination slot %d open", i)
+				t.Errorf("shutdown left destination %s open", address)
 			}
 			if _, err := endpoint.local.Sign([]byte("after shutdown")); err == nil {
-				t.Errorf("shutdown left destination slot %d private keys usable", i)
+				t.Errorf("shutdown left destination %s private keys usable", address)
 			}
 		}
 	})
@@ -538,16 +540,21 @@ func TestPoolReplacesOnlyStaleSelectedDestination(t *testing.T) {
 	observer := pooledLeaseAccount(t, 0, "observer")
 	synctest.Test(t, func(t *testing.T) {
 		manager, attempts, _ := newRecoveryManager(t)
-		var endpoints []*recoveryEndpoint
-		manager.createDestination = func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
-			endpoint := &recoveryEndpoint{local: spec.Local, attempts: attempts, closed: make(chan struct{})}
-			endpoints = append(endpoints, endpoint)
+		created := make(chan *recoveryEndpoint, DestinationPoolSize+1)
+		manager.createDestination = func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
+			endpoint := &recoveryEndpoint{local: spec.Identity, attempts: attempts, closed: make(chan struct{})}
+			created <- endpoint
 			return endpoint, nil
 		}
 		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
 			t.Fatal(err)
 		}
 		current := receiveRecoveryAttempt(t, attempts, observer)
+		endpoints := make(map[string]*recoveryEndpoint, DestinationPoolSize)
+		for range DestinationPoolSize {
+			endpoint := <-created
+			endpoints[endpoint.local.B32()] = endpoint
+		}
 		primary := current.endpoint
 		primary.mu.Lock()
 		primary.dialFailure = dataplane.TunnelErrCircuitNotFound
@@ -561,15 +568,15 @@ func TestPoolReplacesOnlyStaleSelectedDestination(t *testing.T) {
 				delay = 2 * time.Second
 			}
 			current = retryRecoveryAttempt(t, attempts, expected, delay)
-			if selected != 0 && current.endpoint != endpoints[selected] {
+			if selected != 0 && current.endpoint != endpoints[observer.identityAt(selected).Address] {
 				t.Fatalf("stale primary replaced healthy slot %d", selected)
 			}
 		}
 		if current.endpoint == primary {
 			t.Fatal("stale destination endpoint was not replaced")
 		}
-		if len(endpoints) != DestinationPoolSize+1 {
-			t.Fatalf("created %d endpoints, want one replacement beyond the pool", len(endpoints))
+		if replacement := <-created; replacement != current.endpoint || len(created) != 0 {
+			t.Fatal("stale primary replacement recreated more than the selected destination")
 		}
 		select {
 		case <-primary.closed:
@@ -586,11 +593,16 @@ func TestPoolCreationFailureDoesNotDiscardHealthyDestinations(t *testing.T) {
 	observer := pooledLeaseAccount(t, 0, "observer")
 	synctest.Test(t, func(t *testing.T) {
 		manager, attempts, _ := newRecoveryManager(t)
-		var endpoints []*recoveryEndpoint
-		manager.createDestination = func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
-			endpoint := &recoveryEndpoint{local: spec.Local, attempts: attempts, closed: make(chan struct{})}
-			endpoints = append(endpoints, endpoint)
-			if len(endpoints) == 1 {
+		created := make(chan *recoveryEndpoint, DestinationPoolSize+1)
+		var failPrimary sync.Once
+		manager.createDestination = func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
+			endpoint := &recoveryEndpoint{local: spec.Identity, attempts: attempts, closed: make(chan struct{})}
+			created <- endpoint
+			fail := false
+			if spec.Identity.B32() == observer.Identity.Address {
+				failPrimary.Do(func() { fail = true })
+			}
+			if fail {
 				return endpoint, errDestinationCreation
 			}
 			return endpoint, nil
@@ -601,11 +613,16 @@ func TestPoolCreationFailureDoesNotDiscardHealthyDestinations(t *testing.T) {
 		expected := observer
 		expected.Identity = observer.Alternates[0]
 		current := receiveRecoveryAttempt(t, attempts, expected)
-		if len(endpoints) != DestinationPoolSize || current.endpoint != endpoints[1] {
+		endpoints := make(map[string]*recoveryEndpoint, DestinationPoolSize)
+		for range DestinationPoolSize {
+			endpoint := <-created
+			endpoints[endpoint.local.B32()] = endpoint
+		}
+		if current.endpoint != endpoints[observer.Alternates[0].Address] {
 			t.Fatal("initial creation failure prevented using an already-created alternate")
 		}
 		select {
-		case <-endpoints[0].closed:
+		case <-endpoints[observer.Identity.Address].closed:
 		default:
 			t.Fatal("endpoint returned with a creation error leaked")
 		}
@@ -614,20 +631,21 @@ func TestPoolCreationFailureDoesNotDiscardHealthyDestinations(t *testing.T) {
 			expected.Identity = observer.identityAt(selected)
 			current = retryRecoveryAttempt(t, attempts, expected, time.Second)
 		}
-		if current.endpoint != endpoints[1] || len(endpoints) != DestinationPoolSize+1 {
+		replacement := <-created
+		if current.endpoint != endpoints[observer.Alternates[0].Address] || replacement.local.B32() != observer.Identity.Address || len(created) != 0 {
 			t.Fatal("partial creation recovery discarded a healthy alternate")
 		}
 		if err := manager.Close(); err != nil {
 			t.Fatal(err)
 		}
-		for i, endpoint := range endpoints {
+		for _, endpoint := range []*recoveryEndpoint{replacement, endpoints[observer.Identity.Address], endpoints[observer.Alternates[0].Address], endpoints[observer.Alternates[1].Address]} {
 			select {
 			case <-endpoint.closed:
 			default:
-				t.Errorf("partial creation cleanup left endpoint %d open", i)
+				t.Errorf("partial creation cleanup left endpoint %s open", endpoint.local.B32())
 			}
 			if _, err := endpoint.local.Sign([]byte("after partial creation cleanup")); err == nil {
-				t.Errorf("partial creation cleanup left endpoint %d private keys usable", i)
+				t.Errorf("partial creation cleanup left endpoint %s private keys usable", endpoint.local.B32())
 			}
 		}
 	})

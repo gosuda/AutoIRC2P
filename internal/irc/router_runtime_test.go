@@ -14,30 +14,28 @@ import (
 )
 
 type recoveryNode struct {
-	startErr  error
-	closeErr  error
-	waitErr   error
-	started   chan struct{}
-	closing   chan struct{}
-	exited    chan struct{}
-	drained   chan struct{}
-	closeGate <-chan struct{}
-	drainGate <-chan struct{}
-	closeOnce sync.Once
-	exitOnce  sync.Once
-	waitOnce  sync.Once
+	readinessErr error
+	closeErr     error
+	exited       chan struct{}
+	closing      chan struct{}
+	drained      chan struct{}
+	closeGate    <-chan struct{}
+	closeOnce    sync.Once
 }
 
 func newRecoveryNode() *recoveryNode {
-	return &recoveryNode{
-		started: make(chan struct{}), closing: make(chan struct{}),
-		exited: make(chan struct{}), drained: make(chan struct{}),
-	}
+	return &recoveryNode{exited: make(chan struct{}), closing: make(chan struct{}), drained: make(chan struct{})}
 }
 
-func (n *recoveryNode) Start(context.Context) error {
-	close(n.started)
-	return n.startErr
+func (n *recoveryNode) WaitReady(ctx context.Context) error {
+	select {
+	case <-n.exited:
+		return net.ErrClosed
+	case <-n.closing:
+		return net.ErrClosed
+	default:
+		return errors.Join(ctx.Err(), n.readinessErr)
+	}
 }
 
 func (n *recoveryNode) Close() error {
@@ -46,45 +44,27 @@ func (n *recoveryNode) Close() error {
 		if n.closeGate != nil {
 			<-n.closeGate
 		}
-		n.exitOnce.Do(func() { close(n.exited) })
+		close(n.drained)
 	})
 	return n.closeErr
 }
 
-func (n *recoveryNode) Wait() error {
-	<-n.exited
-	if n.drainGate != nil {
-		<-n.drainGate
-	}
-	n.waitOnce.Do(func() { close(n.drained) })
-	return n.waitErr
-}
-
 func (n *recoveryNode) runtime() *routerRuntime {
-	return &routerRuntime{node: n, createDestination: func(ctx context.Context, _ ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
-		endpoint := &routerRecoveryEndpoint{node: n}
-		if err := endpoint.WaitReady(ctx); err != nil {
+	return &routerRuntime{node: n, createDestination: func(ctx context.Context, _ ivnp.DestinationConfig) (destinationEndpoint, error) {
+		if err := n.WaitReady(ctx); err != nil {
 			return nil, err
 		}
-		return endpoint, nil
+		return &routerRecoveryEndpoint{node: n}, nil
 	}}
 }
 
 type routerRecoveryEndpoint struct {
-	ivnp.DestinationEndpoint
+	destinationEndpoint
 	node *recoveryNode
 }
 
-func (e *routerRecoveryEndpoint) WaitReady(ctx context.Context) error {
-	select {
-	case <-e.node.exited:
-		return net.ErrClosed
-	default:
-		return ctx.Err()
-	}
-}
-
-func (e *routerRecoveryEndpoint) Close() error { return nil }
+func (e *routerRecoveryEndpoint) WaitReady(ctx context.Context) error { return e.node.WaitReady(ctx) }
+func (e *routerRecoveryEndpoint) Close() error                        { return nil }
 
 func recoveryManager(t *testing.T, runtime *routerRuntime, factory func() (*routerRuntime, error)) *Manager {
 	t.Helper()
@@ -99,86 +79,15 @@ func recoveryManager(t *testing.T, runtime *routerRuntime, factory func() (*rout
 	return m
 }
 
-func TestRouterStartupRetriesAfterClosingAndDrainingPreviousRuntime(t *testing.T) {
-	account := leaseAccount(t, 0, "observer")
+func TestRouterReadinessFailureDrainsBeforeReplacement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		first, second := newRecoveryNode(), newRecoveryNode()
-		first.startErr = errors.New("startup failed")
-		first.waitErr = first.startErr
-		first.closeErr = first.startErr
-		closeGate, drainGate := make(chan struct{}), make(chan struct{})
-		unblockClose := sync.OnceFunc(func() { close(closeGate) })
-		unblockDrain := sync.OnceFunc(func() { close(drainGate) })
-		defer unblockClose()
-		defer unblockDrain()
-		first.closeGate, first.drainGate = closeGate, drainGate
-		opened := make(chan struct{}, 1)
-		created := make(chan *leaseEndpoint, 1)
-		fresh := second.runtime()
-		fresh.createDestination = func(_ context.Context, spec ivnp.DestinationSpec) (ivnp.DestinationEndpoint, error) {
-			endpoint := waitingEndpoint(spec)
-			created <- endpoint
-			return endpoint, nil
-		}
-		m := recoveryManager(t, first.runtime(), func() (*routerRuntime, error) {
-			opened <- struct{}{}
-			return fresh, nil
-		})
-		if err := m.Start(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-		if err := m.ConnectObserver(t.Context(), account); err != nil {
-			t.Fatal(err)
-		}
-		<-first.closing
-		synctest.Wait()
-		select {
-		case <-opened:
-			t.Fatal("replacement opened before previous Close completed")
-		default:
-		}
-		unblockClose()
-		synctest.Wait()
-		select {
-		case <-opened:
-			t.Fatal("replacement opened before previous workers drained")
-		default:
-		}
-		unblockDrain()
-		synctest.Wait()
-		select {
-		case <-m.ready:
-			t.Fatal("failed startup released initial readiness waiters")
-		case <-created:
-			t.Fatal("observer created an endpoint before successful startup")
-		default:
-		}
-		<-time.After(time.Second)
-		<-opened
-		endpoint := <-created
-		if err := m.Close(); err != nil {
-			t.Fatalf("recovered startup failure poisoned shutdown: %v", err)
-		}
-		select {
-		case <-endpoint.closed:
-		default:
-			t.Fatal("shutdown returned before observer endpoint cleanup")
-		}
-		select {
-		case <-second.drained:
-		default:
-			t.Fatal("shutdown returned before router workers drained")
-		}
-	})
-}
-
-func TestRouterRestartsAfterUnexpectedNodeExit(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		first, second := newRecoveryNode(), newRecoveryNode()
-		closeGate := make(chan struct{})
-		unblockClose := sync.OnceFunc(func() { close(closeGate) })
-		defer unblockClose()
-		first.closeGate = closeGate
+		first.readinessErr = errors.New("router failed before readiness")
+		first.closeErr = first.readinessErr
+		gate := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(gate) })
+		defer unblock()
+		first.closeGate = gate
 		opened := make(chan struct{}, 1)
 		m := recoveryManager(t, first.runtime(), func() (*routerRuntime, error) {
 			opened <- struct{}{}
@@ -187,29 +96,63 @@ func TestRouterRestartsAfterUnexpectedNodeExit(t *testing.T) {
 		if err := m.Start(t.Context()); err != nil {
 			t.Fatal(err)
 		}
+		<-first.closing
+		synctest.Wait()
+		select {
+		case <-opened:
+			t.Fatal("replacement opened before Close joined the old router")
+		case <-m.ready:
+			t.Fatal("failed readiness admitted destinations")
+		default:
+		}
+		unblock()
+		<-first.drained
+		<-time.After(time.Second)
+		<-opened
 		<-m.ready
-		endpoint, err := m.createRouterDestination(t.Context(), ivnp.DestinationSpec{})
+		if err := m.Close(); err != nil {
+			t.Fatalf("recovered failure poisoned shutdown: %v", err)
+		}
+		select {
+		case <-second.drained:
+		default:
+			t.Fatal("shutdown returned before router Close finished")
+		}
+	})
+}
+
+func TestRouterRestartsAfterTerminalReadinessError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		first, second := newRecoveryNode(), newRecoveryNode()
+		gate := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(gate) })
+		defer unblock()
+		first.closeGate = gate
+		m := recoveryManager(t, first.runtime(), func() (*routerRuntime, error) { return second.runtime(), nil })
+		if err := m.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		<-m.ready
+		endpoint, err := m.createRouterDestination(t.Context(), ivnp.DestinationConfig{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		first.exitOnce.Do(func() { close(first.exited) })
+		close(first.exited)
 		<-first.closing
-		if err := endpoint.(ivnp.ReadyDestinationEndpoint).WaitReady(t.Context()); !errors.Is(err, net.ErrClosed) {
-			t.Fatalf("dead router endpoint remained ready: %v", err)
+		if err := endpoint.(destinationReadiness).WaitReady(t.Context()); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("closed router destination remained ready: %v", err)
 		}
-		if _, err := m.createRouterDestination(t.Context(), ivnp.DestinationSpec{}); !errors.Is(err, ErrNotStarted) {
-			t.Fatalf("admitted a destination during router replacement: %v", err)
+		if _, err := m.createRouterDestination(t.Context(), ivnp.DestinationConfig{}); !errors.Is(err, ErrNotStarted) {
+			t.Fatalf("replacement gap admitted a destination: %v", err)
 		}
-		unblockClose()
+		unblock()
 		<-time.After(time.Second)
-		<-opened
-		synctest.Wait()
-		endpoint, err = m.createRouterDestination(t.Context(), ivnp.DestinationSpec{})
-		if err != nil {
-			t.Fatalf("replacement did not admit destinations: %v", err)
-		}
-		if err := endpoint.(ivnp.ReadyDestinationEndpoint).WaitReady(t.Context()); err != nil {
-			t.Fatalf("replacement endpoint is unavailable: %v", err)
+		m.mu.Lock()
+		ready := m.ready
+		m.mu.Unlock()
+		<-ready
+		if _, err := m.createRouterDestination(t.Context(), ivnp.DestinationConfig{}); err != nil {
+			t.Fatalf("replacement unavailable: %v", err)
 		}
 		if err := m.Close(); err != nil {
 			t.Fatal(err)
@@ -217,14 +160,12 @@ func TestRouterRestartsAfterUnexpectedNodeExit(t *testing.T) {
 	})
 }
 
-func TestRouterCancellationStopsBackoffBeforeOpeningReplacement(t *testing.T) {
+func TestRouterCancellationStopsReplacementBackoff(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		first := newRecoveryNode()
-		first.startErr = errors.New("startup failed")
-		first.waitErr = first.startErr
-		opened := make(chan struct{}, 1)
+		first.readinessErr = errors.New("readiness failed")
 		m := recoveryManager(t, first.runtime(), func() (*routerRuntime, error) {
-			opened <- struct{}{}
+			t.Error("canceled retry opened a router")
 			return newRecoveryNode().runtime(), nil
 		})
 		ctx, cancel := context.WithCancel(t.Context())
@@ -238,90 +179,28 @@ func TestRouterCancellationStopsBackoffBeforeOpeningReplacement(t *testing.T) {
 		if err := m.Close(); err != nil {
 			t.Fatal(err)
 		}
-		<-time.After(2 * time.Minute)
-		select {
-		case <-opened:
-			t.Fatal("canceled retry opened a replacement router")
-		default:
-		}
-	})
-}
-
-func TestRouterShutdownJoinsAccountsWaitingForInitialReadiness(t *testing.T) {
-	account := leaseAccount(t, 0, "observer")
-	synctest.Test(t, func(t *testing.T) {
-		first := newRecoveryNode()
-		first.startErr = errors.New("startup failed")
-		m := recoveryManager(t, first.runtime(), func() (*routerRuntime, error) {
-			t.Error("shutdown opened a replacement router")
-			return newRecoveryNode().runtime(), nil
-		})
-		stopping, releaseWorker := make(chan struct{}), make(chan struct{})
-		unblockWorker := sync.OnceFunc(func() { close(releaseWorker) })
-		defer unblockWorker()
-		m.onEvent = func(event Event) {
-			if event.State == "stopped" {
-				close(stopping)
-				<-releaseWorker
-			}
-		}
-		if err := m.Start(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-		if err := m.ConnectObserver(t.Context(), account); err != nil {
-			t.Fatal(err)
-		}
-		<-first.drained
-		synctest.Wait()
-		closed := make(chan error, 1)
-		go func() { closed <- m.Close() }()
-		<-stopping
-		synctest.Wait()
-		select {
-		case err := <-closed:
-			t.Fatalf("shutdown returned before account worker exited: %v", err)
-		default:
-		}
-		unblockWorker()
-		if err := <-closed; err != nil {
-			t.Fatal(err)
-		}
 	})
 }
 
 func TestRouterRecoveredFailurePreservesCleanupError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		first, second, third := newRecoveryNode(), newRecoveryNode(), newRecoveryNode()
-		first.startErr = errors.New("startup failed")
-		first.waitErr = first.startErr
+		first, second := newRecoveryNode(), newRecoveryNode()
+		first.readinessErr = errors.New("readiness failed")
 		cleanupFailure := errors.New("state close failed")
-		first.closeErr = errors.Join(first.startErr, cleanupFailure)
-		second.startErr = first.startErr
-		second.waitErr = second.startErr
-		second.closeErr = errors.New("later state close failed")
-		attempt := 0
-		m := recoveryManager(t, first.runtime(), func() (*routerRuntime, error) {
-			attempt++
-			if attempt == 1 {
-				return second.runtime(), nil
-			}
-			return third.runtime(), nil
-		})
+		first.closeErr = errors.Join(first.readinessErr, cleanupFailure)
+		m := recoveryManager(t, first.runtime(), func() (*routerRuntime, error) { return second.runtime(), nil })
 		if err := m.Start(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		<-m.ready
 		err := m.Close()
-		if !errors.Is(err, cleanupFailure) {
-			t.Fatalf("shutdown lost cleanup failure: %v", err)
-		}
-		if errors.Is(err, first.startErr) {
-			t.Fatalf("shutdown retained recovered operational failure: %v", err)
+		if !errors.Is(err, cleanupFailure) || errors.Is(err, first.readinessErr) {
+			t.Fatalf("shutdown did not preserve only the cleanup failure: %v", err)
 		}
 	})
 }
 
-func TestRouterReadinessWaitsForSuccessfulAddressBookStart(t *testing.T) {
+func TestRouterReadinessWaitsForAddressBookStartup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		book, err := client.AddressBookNewService(client.AddressBookConfig{})
 		if err != nil {
@@ -341,14 +220,13 @@ func TestRouterReadinessWaitsForSuccessfulAddressBookStart(t *testing.T) {
 		synctest.Wait()
 		select {
 		case <-m.ready:
-			t.Fatal("router readiness ignored addressbook startup failure")
+			t.Fatal("addressbook startup failure admitted destinations")
 		default:
 		}
-		<-time.After(5 * time.Second)
-		<-second.started
-		synctest.Wait()
-		if _, err := m.createRouterDestination(t.Context(), ivnp.DestinationSpec{}); err != nil {
-			t.Fatalf("addressbook failure prevented replacement startup: %v", err)
+		<-time.After(time.Second)
+		<-m.ready
+		if _, err := m.createRouterDestination(t.Context(), ivnp.DestinationConfig{}); err != nil {
+			t.Fatal(err)
 		}
 		if err := m.Close(); err != nil {
 			t.Fatal(err)

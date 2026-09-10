@@ -46,6 +46,10 @@ const en = {
   sendFailed: 'Not sent', unconfirmed: 'Send not confirmed', outgoing: 'Outgoing messages',
   translationSendFailed: 'Translation failed. Your draft is still here.', messageInvalid: 'This message is too long or contains unsupported characters.', requestConflict: 'This request was already handled. Check the conversation before sending again.', signInToSend: 'Sign in to send this message.',
   checkStatus: 'Check status', checking: 'Checking…', restoreDraft: 'Use as draft',
+  resend: 'Send again', deleteSend: 'Delete',
+  retryUnconfirmedWarning: 'This message may already have been delivered. Sending it again may create a duplicate. Send again?',
+  deleteFailed: 'Could not delete the outgoing message. Try again.',
+  sendChanged: 'This message is still sending or has been delivered. Check its status before trying again.',
   sendsError: 'Could not load outgoing messages.'
 };
 
@@ -95,6 +99,10 @@ const ko: typeof en = {
   sendFailed: '전송 실패', unconfirmed: '전송 확인 불가', outgoing: '보내는 메시지',
   translationSendFailed: '번역하지 못했어요. 작성한 내용은 그대로 남아 있어요.', messageInvalid: '메시지가 너무 길거나 보낼 수 없는 문자가 있어요.', requestConflict: '이미 처리한 요청이에요. 다시 보내기 전에 대화를 확인해 주세요.', signInToSend: '메시지를 보내려면 로그인해 주세요.',
   checkStatus: '상태 확인', checking: '확인 중…', restoreDraft: '초안으로 사용',
+  resend: '다시 보내기', deleteSend: '삭제',
+  retryUnconfirmedWarning: '이미 전달된 메시지일 수 있습니다. 다시 보내면 중복 전송될 수 있습니다. 다시 보내시겠습니까?',
+  deleteFailed: '보내는 메시지를 삭제하지 못했어요. 다시 시도해 주세요.',
+  sendChanged: '아직 전송 중이거나 이미 전달된 메시지입니다. 상태를 확인해 주세요.',
   sendsError: '보내는 메시지를 불러올 수 없습니다.'
 };
 

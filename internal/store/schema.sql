@@ -57,6 +57,7 @@ CREATE TABLE send_requests (
  updated_at INTEGER NOT NULL DEFAULT 0,
  expires_at INTEGER NOT NULL DEFAULT 0,
  payload_purged INTEGER NOT NULL DEFAULT 0,
+ dismissed INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY (user_id, request_id)
 );
 CREATE INDEX send_requests_echo ON send_requests(room,nick COLLATE NOCASE,wire_text,created_at);

@@ -3,7 +3,7 @@
   import { messageKey, type Language, type Message, type Outgoing } from './api';
   import { copy, languageName } from './i18n';
 
-  let { language, translationEnabled, autoTranslate, roomName, messages, outgoing, loading, error, sendsError, checking, onread, onretry, oncheck, onrestore }: {
+  let { language, translationEnabled, autoTranslate, roomName, messages, outgoing, loading, error, sendsError, checking, recovering, submitting, ready, onread, onretry, oncheck, onrestore, onresend, ondelete }: {
     language: Language;
     translationEnabled: boolean;
     autoTranslate: boolean;
@@ -14,10 +14,15 @@
     error: string;
     sendsError: string;
     checking: Record<string, boolean>;
+    recovering: Record<string, boolean>;
+    submitting: Record<string, boolean>;
+    ready: boolean;
     onread: (roomName: string, messageId: number) => void;
     onretry: () => void;
     oncheck: (send: Outgoing) => void;
     onrestore: (send: Outgoing) => void;
+    onresend: (send: Outgoing) => void;
+    ondelete: (send: Outgoing) => void;
   } = $props();
   let viewport: HTMLDivElement;
   let atBottom = $state(true);
@@ -182,7 +187,7 @@
       {#each pending as send (send.requestId)}
         <article class="message own-message outgoing-message" class:outgoing-error={send.state === 'failed' || send.state === 'unconfirmed'} aria-label={text.outgoing} onpointerdown={(event) => pointerDown(event, send)} onpointermove={pointerMove} onpointerup={cancelPress} onpointercancel={cancelPress} onlostpointercapture={cancelPress} oncontextmenu={(event) => contextMenu(event, send)}>
           <header class="message-header"><button type="button" class="message-nick message-details-trigger" title={text.metadataHint} aria-label={text.messageDetails} onclick={(event) => void showDetails(send, event.currentTarget.closest('article')!)}>{text.you}</button>{#if !autoTranslate}<time datetime={send.createdAt}>{timeFormat.format(new Date(send.createdAt))}</time>{/if}{#if send.state === 'confirmed'}{@render sentCheck()}{/if}</header>
-          {#if !autoTranslate || send.state === 'translating'}<p class="message-original" dir="auto">{send.original}</p>{/if}
+          {#if !autoTranslate || send.state !== 'confirmed'}<p class="message-original" dir="auto">{send.original}</p>{/if}
           {#if send.state !== 'confirmed'}
             <div class="outgoing-status" role="status">
               {#if send.state === 'translating'}{translationEnabled ? text.translating : text.sending}
@@ -191,8 +196,12 @@
               {:else}{text.unconfirmed}{/if}
             </div>
             <div class="outgoing-actions">
-              {#if send.state === 'unconfirmed' || send.state === 'awaiting_echo'}<button type="button" class="text-button" disabled={checking[send.requestId]} onclick={() => oncheck(send)}>{checking[send.requestId] ? text.checking : text.checkStatus}</button>{/if}
-              {#if send.state === 'failed' || send.state === 'unconfirmed'}<button type="button" class="text-button" onclick={() => onrestore(send)}>{text.restoreDraft}</button>{/if}
+              {#if send.state === 'unconfirmed' || send.state === 'awaiting_echo'}<button type="button" class="text-button" disabled={checking[send.requestId] || recovering[send.requestId]} onclick={() => oncheck(send)}>{checking[send.requestId] ? text.checking : text.checkStatus}</button>{/if}
+              {#if send.state === 'failed' || send.state === 'unconfirmed'}
+                <button type="button" class="text-button" disabled={!ready || recovering[send.requestId] || checking[send.requestId] || submitting[send.room]} onclick={() => onresend(send)}>{text.resend}</button>
+                <button type="button" class="text-button" disabled={recovering[send.requestId] || checking[send.requestId] || submitting[send.room]} onclick={() => ondelete(send)}>{text.deleteSend}</button>
+                <button type="button" class="text-button" onclick={() => onrestore(send)}>{text.restoreDraft}</button>
+              {/if}
             </div>
           {/if}
         </article>

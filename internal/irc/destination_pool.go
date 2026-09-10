@@ -1,7 +1,9 @@
 package irc
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"gosuda.org/ivnp"
@@ -10,7 +12,7 @@ import (
 
 type destinationSlot struct {
 	local       *foundation.LocalDestination
-	endpoint    ivnp.DestinationEndpoint
+	endpoint    destinationEndpoint
 	ready       bool
 	creationErr error
 }
@@ -32,7 +34,9 @@ func restoreDestinations(account Account, first int) ([]destinationSlot, error) 
 
 func (m *Manager) createAccountDestination(state *accountConnection, slot *destinationSlot) error {
 	m.status(state.account.ID, "connecting", "Creating I2P destination")
-	endpoint, err := m.createDestination(state.ctx, ivnp.DestinationSpec{Local: slot.local})
+	ctx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
+	defer cancel()
+	endpoint, err := m.createDestination(ctx, ivnp.DestinationConfig{Identity: slot.local})
 	slot.endpoint = endpoint
 	if err != nil {
 		m.closeAccountDestination(state, slot)

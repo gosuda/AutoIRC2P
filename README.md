@@ -86,6 +86,8 @@ Sign up and sign in with a nickname and password; no email input is required. Ne
 
 Successful IRC writes still wait for the shared reader's echo before showing confirmation. If the reader is unavailable, a message can remain unconfirmed; it is never automatically resent.
 
+Failed messages offer **Send again**, **Delete**, and **Use as draft**. Send again creates a new request with the original room, text, and translation mode, even if Auto-translate has since changed. Unconfirmed retries require confirmation because the original may already have arrived. Delete hides the outgoing entry across reloads; it does not retract IRC messages or remove delivered history. Failed and unconfirmed entries remain actionable until dismissed or normal payload retention expires.
+
 Before its first personal IRC status arrives, a login shows `connecting` / `Waiting for IRC account connection`, not `stopped`. Real stop events remain visible to active clients; their cached terminal state is cleared when the last account subscription closes.
 
 The most recently active room opens by default, ahead of saved favorites; empty rooms fall back to configured order. New activity reorders the list without switching your open conversation. On mobile, swipe left across the conversation or tap the room-menu button to open the left drawer; swiping right from the left edge also opens it. Selecting a room, tapping the backdrop, or pressing Escape closes the drawer. Desktop keeps the persistent sidebar.
@@ -149,9 +151,11 @@ hops = 3
 
 Existing explicit hop settings are preserved. One hop offers less anonymity margin than multiple hops.
 
-Configured tunnel pool capacities are preserved. IVNP removes replaced tunnels from selection but retains their execution state until the original advertised expiration, so renewal does not interrupt peers still using cached leases.
+The integration uses IVNP's root `Router`/`Destination` API. Hop counts, inbound/outbound tunnel targets, and renewal lead time are mapped from the INI configuration. Explicit settings without a root-API equivalent (including legacy pool capacities, bandwidth limits, daemon listeners, and NAT mapping) fail configuration loading rather than being silently ignored. IVNP retains retiring tunnels until their advertised expiration.
 
-The default `IRC_MAX_ACCOUNTS=16` automatically reserves capacity for 54 destinations: 52 for account/reader pools and IVNP's default destination, plus two warmups. If `[state] max_destinations` is omitted, embedded capacity grows with the account limit, capped at 256 destinations; 84 active accounts remain supported by evicting unused warmups when needed. Explicit destination limits are preserved. For example, `IRC_MAX_ACCOUNTS=62` automatically reserves 192 destinations.
+The default `IRC_MAX_ACCOUNTS=16` reserves 53 destinations: 51 for account/reader pools and two warmups. The root API supports at most **64 destinations**, allowing **20 registered accounts** plus the reader's three-destination pool. Unused warmups yield capacity to active accounts. Explicit `[state] max_destinations` limits are honored up to 64; larger values are rejected.
+
+Account identity keys remain in the application's encrypted store and are imported unchanged. Router persistence uses the existing `state_dir`, with `router.state` and `router.keys` together. IVNP rejects incompatible legacy router state containing named destinations; the application does not delete or rewrite it to force migration. Preserve a backup and configure a separate `[paths] state_dir` if necessary; this changes the router identity, not stored account identities.
 
 ## Updates and data
 

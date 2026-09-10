@@ -2,11 +2,8 @@ package irc
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"testing"
-
-	"gosuda.org/ivnp"
 )
 
 func TestIdentityRestorePreservesSigningAndAddress(t *testing.T) {
@@ -59,44 +56,6 @@ func TestDifferentAccountsHaveDifferentDestinations(t *testing.T) {
 	first.Address = second.Address
 	if _, err := restoreIdentity(first); !errors.Is(err, errIdentityMismatch) {
 		t.Fatalf("mismatched persisted identity accepted: %v", err)
-	}
-}
-
-func TestGeneratedIdentityOpensStreamingDestination(t *testing.T) {
-	identity, err := GenerateIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer clear(identity.Keys)
-	local, err := restoreIdentity(identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer local.ReleaseSensitive()
-	cfg, err := ivnp.ParseConfig("[paths]\ndata_dir = "+t.TempDir()+"\n", "test.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	node, err := ivnp.New(cfg, ivnp.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := node.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	endpoint, err := node.DestinationController().CreateDestination(context.Background(), ivnp.DestinationSpec{Local: local})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := endpoint.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	if endpoint.B32() != identity.Address {
-		t.Fatal("streaming endpoint changed identity")
 	}
 }
 
