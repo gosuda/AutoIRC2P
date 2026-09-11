@@ -23,15 +23,17 @@ var (
 	ErrNotConnected     = errors.New("IRC account has not joined this room")
 	ErrObserverReadOnly = errors.New("observer cannot send messages")
 	ErrAccountCapacity  = errors.New("IRC account capacity reached")
-	errInvalidConfig    = errors.New("IRC requires an I2P server with port, a config path, and configured rooms")
+	errInvalidConfig    = errors.New("IRC requires an I2P server with port and configured rooms")
 	errInvalidAccount   = errors.New("IRC account has invalid ID, password, or identity pool")
 	errNickUnavailable  = errors.New("nickname is unavailable; choose another nickname or recover it through the IRC network")
-	errNoReadiness      = errors.New("IVNP destination does not support readiness")
 )
 
-const reconnectDelay = time.Second
-
-const DestinationPoolSize = 3
+const (
+	reconnectDelay        = time.Second
+	DestinationPoolSize   = 3
+	maxRouterDestinations = 64
+	defaultRouterHops     = 1
+)
 
 type Account struct {
 	ID         int64
@@ -54,9 +56,9 @@ type Event struct {
 }
 
 type Config struct {
-	ConfigPath string
-	Server     string
-	Rooms      []string
+	StateDir string
+	Server   string
+	Rooms    []string
 	// Zero selects 20 minutes idle and 2 minutes for PING/PONG writes.
 	IdleTimeout, PongTimeout time.Duration
 	// Zero selects 16 registered accounts and a 2-minute last-release grace.
@@ -125,7 +127,7 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	if !strings.HasSuffix(strings.ToLower(host), ".i2p") || !safeAtom(host) {
 		return nil, errInvalidConfig
 	}
-	if cfg.ConfigPath == "" || len(cfg.Rooms) == 0 || onEvent == nil {
+	if len(cfg.Rooms) == 0 || onEvent == nil {
 		return nil, errInvalidConfig
 	}
 	if cfg.IdleTimeout < 0 || cfg.PongTimeout < 0 || cfg.MaxAccounts < 0 || cfg.AccountIdleGrace < 0 {
@@ -151,23 +153,24 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 		rooms[fold(room)] = room
 	}
 	destinationCapacity := min((cfg.MaxAccounts+1)*DestinationPoolSize+prewarmCapacity, maxRouterDestinations)
-	configuration, err := loadRouterConfig(cfg.ConfigPath, destinationCapacity)
-	if err != nil {
-		return nil, fmt.Errorf("load IVNP configuration: %w", err)
+	openRouter := func() (*routerRuntime, error) {
+		return openRouterRuntime(cfg.StateDir, destinationCapacity)
 	}
-	// Unclaimed warmups yield capacity to active account pools.
-	maxAccounts := configuration.State.MaxDestinations/DestinationPoolSize - 1
-	if cfg.MaxAccounts > maxAccounts {
-		return nil, fmt.Errorf("IRC MaxAccounts=%d with %d destinations per account and observer exceeds IVNP state.max_destinations=%d (maximum IRC MaxAccounts=%d): %w", cfg.MaxAccounts, DestinationPoolSize, configuration.State.MaxDestinations, max(0, maxAccounts), errInvalidConfig)
-	}
-	openRouter := func() (*routerRuntime, error) { return openRouterRuntime(configuration) }
 	router, err := openRouter()
 	if err != nil {
 		return nil, err
 	}
 	cfg.Rooms = append([]string(nil), cfg.Rooms...)
-	manager := &Manager{cfg: cfg, router: router, newRouter: openRouter, onEvent: onEvent, rooms: rooms, ready: make(chan struct{}), accounts: make(map[int64]*accountConnection)}
-	manager.destinationCapacity = configuration.State.MaxDestinations
+	manager := &Manager{
+		cfg:                 cfg,
+		router:              router,
+		newRouter:           openRouter,
+		onEvent:             onEvent,
+		rooms:               rooms,
+		ready:               make(chan struct{}),
+		accounts:            make(map[int64]*accountConnection),
+		destinationCapacity: destinationCapacity,
+	}
 	manager.createDestination = manager.createRouterDestination
 	return manager, nil
 }
@@ -474,13 +477,9 @@ func (m *Manager) runAccount(state *accountConnection) {
 		if err == nil && !slot.ready {
 			stage = "destination readiness"
 			m.status(state.account.ID, "connecting", "Waiting for I2P destination tunnels")
-			if ready, ok := slot.endpoint.(destinationReadiness); ok {
-				readyCtx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
-				err = ready.WaitReady(readyCtx)
-				cancel()
-			} else {
-				err = errNoReadiness
-			}
+			readyCtx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
+			err = slot.endpoint.WaitReady(readyCtx)
+			cancel()
 			slot.ready = err == nil
 		}
 		if err == nil {
@@ -490,7 +489,7 @@ func (m *Manager) runAccount(state *accountConnection) {
 			var conn net.Conn
 			conn, err = m.dialIRC(dialCtx, slot.endpoint)
 			dialCancel()
-			if err == nil {
+			if err == nil && conn != nil {
 				stage = "IRC session"
 				err = m.serveConnection(state, &wireConnection{Conn: conn})
 			}
@@ -500,7 +499,7 @@ func (m *Manager) runAccount(state *accountConnection) {
 		}
 		closedEndpoint := errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
 		staleRoute := errors.Is(err, dataplane.TunnelErrCircuitNotFound) || errors.Is(err, dataplane.TunnelErrCircuitExpired)
-		replaceEndpoint := errors.Is(err, errNoReadiness) || staleRoute || (stage != "IRC session" && closedEndpoint)
+		replaceEndpoint := staleRoute || (stage != "IRC session" && closedEndpoint)
 		if replaceEndpoint {
 			m.closeAccountDestination(state, slot)
 		}

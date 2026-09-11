@@ -5,21 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	"gosuda.org/ivnp"
 	"gosuda.org/ivnp/client"
-	"gosuda.org/ivnp/state"
 )
 
 type destinationEndpoint interface {
 	DialContext(context.Context, string, string) (net.Conn, error)
-	Close() error
-}
-
-type destinationReadiness interface {
 	WaitReady(context.Context) error
+	Close() error
 }
 
 type routerNode interface {
@@ -34,20 +31,38 @@ type routerRuntime struct {
 	createDestination func(context.Context, ivnp.DestinationConfig) (destinationEndpoint, error)
 }
 
-func openRouterRuntime(configuration state.ConfigurationOperating) (*routerRuntime, error) {
-	cfg, tunnels, err := embeddedRouterConfig(configuration)
-	if err != nil {
-		return nil, err
+func openRouterRuntime(stateDir string, destinationCapacity int) (*routerRuntime, error) {
+	cfg := ivnp.DefaultRouterConfig()
+	if stateDir != "" {
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
+			return nil, fmt.Errorf("create I2P state directory: %w", err)
+		}
+		cfg.Persistence = &ivnp.PersistenceConfig{Directory: stateDir}
 	}
-	addressBook, err := newAddressBook(configuration)
-	if err != nil {
-		return nil, fmt.Errorf("open I2P addressbook: %w", err)
+	cfg.Limits.MaxDestinations = destinationCapacity
+	cfg.Exploratory.Inbound.Hops = defaultRouterHops
+	cfg.Exploratory.Outbound.Hops = defaultRouterHops
+
+	tunnels := ivnp.DefaultDestinationConfig().Tunnels
+	tunnels.Inbound.Hops = defaultRouterHops
+	tunnels.Outbound.Hops = defaultRouterHops
+
+	var addressBook *client.AddressBookService
+	if stateDir != "" {
+		var err error
+		addressBook, err = newAddressBook(stateDir)
+		if err != nil {
+			return nil, fmt.Errorf("open I2P addressbook: %w", err)
+		}
+	}
+	if addressBook != nil {
+		cfg.Resolver = newAddressBookResolver(addressBook)
 	}
 	runtime := &routerRuntime{addressBook: addressBook}
 	runtime.open = func(ctx context.Context) (routerNode, error) {
 		router, err := ivnp.NewRouter(ctx, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("open embedded I2P router (existing state must be compatible with IVNP's root API; no state was removed): %w", err)
+			return nil, fmt.Errorf("open embedded I2P router: %w", err)
 		}
 		runtime.createDestination = func(ctx context.Context, supplied ivnp.DestinationConfig) (destinationEndpoint, error) {
 			destination := ivnp.DefaultDestinationConfig()

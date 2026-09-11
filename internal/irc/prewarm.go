@@ -105,11 +105,7 @@ func (m *Manager) runPrewarm(warm *warmDestination) {
 	readyCtx, cancel := context.WithTimeout(warm.ctx, 5*time.Minute)
 	warm.slot.endpoint, err = m.createDestination(readyCtx, ivnp.DestinationConfig{Identity: warm.slot.local})
 	if err == nil {
-		if endpoint, ok := warm.slot.endpoint.(destinationReadiness); ok {
-			err = endpoint.WaitReady(readyCtx)
-		} else {
-			err = errNoReadiness
-		}
+		err = warm.slot.endpoint.WaitReady(readyCtx)
 	}
 	cancel()
 	if err != nil {

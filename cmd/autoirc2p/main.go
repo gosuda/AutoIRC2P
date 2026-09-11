@@ -60,7 +60,7 @@ func run() (err error) {
 		}
 	}
 	var app *server.Server
-	bridge, err := irc.New(irc.Config{ConfigPath: cfg.IVNPConfig, Server: cfg.IRCServer, Rooms: cfg.Rooms, IdleTimeout: cfg.IRCIdleTimeout, PongTimeout: cfg.IRCPongTimeout, MaxAccounts: cfg.IRCMaxAccounts, AccountIdleGrace: cfg.IRCAccountIdleGrace}, func(event irc.Event) { app.Event(ctx, event) })
+	bridge, err := irc.New(irc.Config{StateDir: filepath.Join(cfg.DataDir, "state"), Server: cfg.IRCServer, Rooms: cfg.Rooms, IdleTimeout: cfg.IRCIdleTimeout, PongTimeout: cfg.IRCPongTimeout, MaxAccounts: cfg.IRCMaxAccounts, AccountIdleGrace: cfg.IRCAccountIdleGrace}, func(event irc.Event) { app.Event(ctx, event) })
 	if err != nil {
 		return err
 	}

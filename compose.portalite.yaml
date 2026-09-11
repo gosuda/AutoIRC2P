@@ -12,7 +12,6 @@ services:
       APP_ORIGIN: ""
       DATA_DIR: /data
       WEB_DIR: /web/build
-      IVNP_CONFIG: /data/ivnp.conf
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     volumes:
       - app_data:/data

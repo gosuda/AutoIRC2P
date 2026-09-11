@@ -63,6 +63,9 @@ type routerRecoveryEndpoint struct {
 	node *recoveryNode
 }
 
+func (e *routerRecoveryEndpoint) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+	return nil, nil
+}
 func (e *routerRecoveryEndpoint) WaitReady(ctx context.Context) error { return e.node.WaitReady(ctx) }
 func (e *routerRecoveryEndpoint) Close() error                        { return nil }
 
@@ -139,7 +142,7 @@ func TestRouterRestartsAfterTerminalReadinessError(t *testing.T) {
 		}
 		close(first.exited)
 		<-first.closing
-		if err := endpoint.(destinationReadiness).WaitReady(t.Context()); !errors.Is(err, net.ErrClosed) {
+		if err := endpoint.WaitReady(t.Context()); !errors.Is(err, net.ErrClosed) {
 			t.Fatalf("closed router destination remained ready: %v", err)
 		}
 		if _, err := m.createRouterDestination(t.Context(), ivnp.DestinationConfig{}); !errors.Is(err, ErrNotStarted) {
@@ -229,6 +232,35 @@ func TestRouterReadinessWaitsForAddressBookStartup(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := m.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestOpenRouterRuntime(t *testing.T) {
+	t.Run("in-memory mode", func(t *testing.T) {
+		runtime, err := openRouterRuntime("", 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.addressBook != nil {
+			t.Errorf("in-memory addressBook = %v, want nil", runtime.addressBook)
+		}
+		if err := runtime.close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("persistent mode", func(t *testing.T) {
+		dir := t.TempDir()
+		runtime, err := openRouterRuntime(dir, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.addressBook == nil {
+			t.Error("persistent addressBook is nil, want non-nil")
+		}
+		if err := runtime.close(); err != nil {
 			t.Fatal(err)
 		}
 	})

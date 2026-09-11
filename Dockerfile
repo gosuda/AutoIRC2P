@@ -29,7 +29,6 @@ COPY LICENSE /app/LICENSE
 COPY third_party/translation/LICENSE /app/translation-LICENSE
 ENV LISTEN_ADDR=0.0.0.0:8080 \
     DATA_DIR=/data \
-    IVNP_CONFIG=/data/ivnp.conf \
     WEB_DIR=/web/build
 USER 65532:65532
 VOLUME ["/data"]

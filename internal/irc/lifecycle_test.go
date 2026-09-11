@@ -4,11 +4,8 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -583,18 +580,13 @@ func TestAdmissionRejectsUnrestorableAlternateWithoutReservingCapacity(t *testin
 func TestManagerRejectsInsufficientDestinationCapacity(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		capacity    int
 		maxAccounts int
 	}{
-		{name: "default accounts exceed configured capacity", capacity: 50},
-		{name: "account limit cannot overflow pool budget", capacity: 64, maxAccounts: int(^uint(0) >> 1)},
+		{name: "accounts exceed max router destinations", maxAccounts: 21},
+		{name: "account limit cannot overflow pool budget", maxAccounts: int(^uint(0) >> 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "ivnp.conf")
-			if err := os.WriteFile(path, []byte(fmt.Sprintf("[state]\nmax_destinations = %d\n", tc.capacity)), 0600); err != nil {
-				t.Fatal(err)
-			}
-			manager, err := New(Config{ConfigPath: path, Server: "offline.b32.i2p:6667", Rooms: []string{"#first"}, MaxAccounts: tc.maxAccounts}, func(Event) {})
+			manager, err := New(Config{Server: "offline.b32.i2p:6667", Rooms: []string{"#first"}, MaxAccounts: tc.maxAccounts}, func(Event) {})
 			if manager != nil {
 				if closeErr := manager.Close(); closeErr != nil {
 					t.Error(closeErr)

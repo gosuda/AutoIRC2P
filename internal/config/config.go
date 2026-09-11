@@ -13,7 +13,7 @@ import (
 )
 
 type Config struct {
-	Listen, Origin, DataDir, WebDir, IVNPConfig, IRCServer, BaseURL, APIKey string
+	Listen, Origin, DataDir, WebDir, IRCServer, BaseURL, APIKey string
 	ObserverNick, ObserverPassword                                          string
 	Models, Rooms                                                           []string
 	Interval, Cooldown                                                      time.Duration
@@ -73,7 +73,7 @@ func env(key, fallback string) string {
 const defaultRooms = "#i2p,#i2p-chat,#saltr,#i2p-dev,#i2pd-dev,#i2pd,#ru,#scanners,#i2p-news,#i2c2p,#salt,#freedom,#i2pd-ru,#go-i2p-dev,#i2people,#ko,#ivnp-dev,#ivnp,#dev,#i2p-design,#i2p-de,#go-i2p"
 
 func Load() (Config, error) {
-	cfg := Config{Listen: env("LISTEN_ADDR", "127.0.0.1:8080"), Origin: env("APP_ORIGIN", "http://localhost:8080"), DataDir: env("DATA_DIR", "data"), WebDir: env("WEB_DIR", "web/build"), IVNPConfig: env("IVNP_CONFIG", "data/ivnp.conf"), IRCServer: env("IRC_SERVER", "irc.postman.i2p:6667"), Rooms: strings.Split(env("IRC_ROOMS", defaultRooms), ","), Offline: os.Getenv("IRC_OFFLINE") == "1"}
+	cfg := Config{Listen: env("LISTEN_ADDR", "127.0.0.1:8080"), Origin: env("APP_ORIGIN", "http://localhost:8080"), DataDir: env("DATA_DIR", "data"), WebDir: env("WEB_DIR", "web/build"), IRCServer: env("IRC_SERVER", "irc.postman.i2p:6667"), Rooms: strings.Split(env("IRC_ROOMS", defaultRooms), ","), Offline: os.Getenv("IRC_OFFLINE") == "1"}
 	switch os.Getenv("TRANSLATION_ENABLED") {
 	case "", "1":
 		cfg.TranslationEnabled = true

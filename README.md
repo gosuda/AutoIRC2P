@@ -142,20 +142,11 @@ Edit `.env`, then run the start command again.
 
 Disabling request quotas leaves connection/queue capacity limits and translation-provider pacing active. Trust-all permits forged `X-Forwarded-For` values; use it only when you accept that risk. Both Compose modes honor an explicit trusted-proxy value; their existing defaults remain unchanged. For standalone `docker run`, pass these settings with `--env RATE_LIMIT_ENABLED=0` and `--env TRUSTED_PROXY_CIDRS=0.0.0.0/0,::/0`.
 
-`ivnp.conf` is created automatically if missing: `/data/ivnp.conf` in Docker, `data/ivnp.conf` for a native run. The default tunnel length is **1 hop**. To change it, edit the `[tunnel]` section and restart:
+The integration uses IVNP's embedded public `Router`/`Destination` API directly in Go, with a default tunnel length of **1 hop**. IVNP retains retiring tunnels until their advertised expiration.
 
-```ini
-[tunnel]
-hops = 3
-```
+The default `IRC_MAX_ACCOUNTS=16` reserves 53 destinations: 51 for account/reader pools and two warmups. The root API supports at most **64 destinations**, allowing **20 registered accounts** plus the reader's three-destination pool. Unused warmups yield capacity to active accounts.
 
-Existing explicit hop settings are preserved. One hop offers less anonymity margin than multiple hops.
-
-The integration uses IVNP's root `Router`/`Destination` API. Hop counts, inbound/outbound tunnel targets, and renewal lead time are mapped from the INI configuration. Explicit settings without a root-API equivalent (including legacy pool capacities, bandwidth limits, daemon listeners, and NAT mapping) fail configuration loading rather than being silently ignored. IVNP retains retiring tunnels until their advertised expiration.
-
-The default `IRC_MAX_ACCOUNTS=16` reserves 53 destinations: 51 for account/reader pools and two warmups. The root API supports at most **64 destinations**, allowing **20 registered accounts** plus the reader's three-destination pool. Unused warmups yield capacity to active accounts. Explicit `[state] max_destinations` limits are honored up to 64; larger values are rejected.
-
-Account identity keys remain in the application's encrypted store and are imported unchanged. Router persistence uses the existing `state_dir`, with `router.state` and `router.keys` together. IVNP rejects incompatible legacy router state containing named destinations; the application does not delete or rewrite it to force migration. Preserve a backup and configure a separate `[paths] state_dir` if necessary; this changes the router identity, not stored account identities.
+Account identity keys remain in the application's encrypted store and are imported unchanged. Router persistence uses the application's state directory (`data/state`), with `router.state` and `router.keys` together. IVNP rejects incompatible legacy router state containing named destinations.
 
 ## Updates and data
 
