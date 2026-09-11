@@ -144,7 +144,7 @@ Disabling request quotas leaves connection/queue capacity limits and translation
 
 The integration uses IVNP's embedded public `Router`/`Destination` API directly in Go, with a default tunnel length of **1 hop**. IVNP retains retiring tunnels until their advertised expiration.
 
-The default `IRC_MAX_ACCOUNTS=16` reserves 53 destinations: 51 for account/reader pools and two warmups. The root API supports at most **64 destinations**, allowing **20 registered accounts** plus the reader's three-destination pool. Unused warmups yield capacity to active accounts.
+The default `IRC_MAX_ACCOUNTS=16` reserves 53 destinations: 51 for account/reader pools and two warmups. Embedded destination capacity grows automatically with the configured account limit (three destinations per active account plus reader pool and warmups). Unused warmups yield capacity to active accounts.
 
 Account identity keys remain in the application's encrypted store and are imported unchanged. Router persistence uses the application's state directory (`data/state`), with `router.state` and `router.keys` together. IVNP rejects incompatible legacy router state containing named destinations.
 

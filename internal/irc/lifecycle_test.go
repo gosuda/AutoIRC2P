@@ -582,7 +582,6 @@ func TestManagerRejectsInsufficientDestinationCapacity(t *testing.T) {
 		name        string
 		maxAccounts int
 	}{
-		{name: "accounts exceed max router destinations", maxAccounts: 21},
 		{name: "account limit cannot overflow pool budget", maxAccounts: int(^uint(0) >> 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -596,5 +595,17 @@ func TestManagerRejectsInsufficientDestinationCapacity(t *testing.T) {
 				t.Fatalf("insufficient destination capacity = %v, want invalid configuration", err)
 			}
 		})
+	}
+}
+
+func TestManagerAllowsHighAccountCapacity(t *testing.T) {
+	manager, err := New(Config{Server: "offline.b32.i2p:6667", Rooms: []string{"#first"}, MaxAccounts: 100}, func(Event) {})
+	if err != nil {
+		t.Fatalf("New with MaxAccounts=100 failed: %v", err)
+	}
+	if manager != nil {
+		if closeErr := manager.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
 	}
 }

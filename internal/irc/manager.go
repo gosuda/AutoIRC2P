@@ -23,16 +23,15 @@ var (
 	ErrNotConnected     = errors.New("IRC account has not joined this room")
 	ErrObserverReadOnly = errors.New("observer cannot send messages")
 	ErrAccountCapacity  = errors.New("IRC account capacity reached")
-	errInvalidConfig    = errors.New("IRC requires an I2P server with port and configured rooms")
+	errInvalidConfig    = errors.New("invalid IRC configuration")
 	errInvalidAccount   = errors.New("IRC account has invalid ID, password, or identity pool")
 	errNickUnavailable  = errors.New("nickname is unavailable; choose another nickname or recover it through the IRC network")
 )
 
 const (
-	reconnectDelay        = time.Second
-	DestinationPoolSize   = 3
-	maxRouterDestinations = 64
-	defaultRouterHops     = 1
+	reconnectDelay      = time.Second
+	DestinationPoolSize = 3
+	defaultRouterHops   = 1
 )
 
 type Account struct {
@@ -122,22 +121,23 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 	host, port, err := net.SplitHostPort(cfg.Server)
 	portNumber, portErr := strconv.ParseUint(port, 10, 16)
 	if err != nil || portErr != nil || portNumber == 0 {
-		return nil, errInvalidConfig
+		return nil, fmt.Errorf("IRC requires an I2P server with port: %w", errInvalidConfig)
 	}
 	if !strings.HasSuffix(strings.ToLower(host), ".i2p") || !safeAtom(host) {
-		return nil, errInvalidConfig
+		return nil, fmt.Errorf("IRC server host must be a valid .i2p address: %w", errInvalidConfig)
 	}
 	if len(cfg.Rooms) == 0 || onEvent == nil {
-		return nil, errInvalidConfig
+		return nil, fmt.Errorf("IRC requires configured rooms and an event handler: %w", errInvalidConfig)
 	}
 	if cfg.IdleTimeout < 0 || cfg.PongTimeout < 0 || cfg.MaxAccounts < 0 || cfg.AccountIdleGrace < 0 {
-		return nil, errInvalidConfig
+		return nil, fmt.Errorf("IRC timeouts and account limits must not be negative: %w", errInvalidConfig)
 	}
 	if cfg.MaxAccounts == 0 {
 		cfg.MaxAccounts = 16
 	}
-	if cfg.MaxAccounts > maxRouterDestinations/DestinationPoolSize-1 {
-		return nil, fmt.Errorf("IRC account limit exceeds %d-destination pool capacity: %w", maxRouterDestinations, errInvalidConfig)
+	maxInt := int(^uint(0) >> 1)
+	if cfg.MaxAccounts > (maxInt-prewarmCapacity)/DestinationPoolSize-1 {
+		return nil, fmt.Errorf("IRC account limit (%d) exceeds capacity: %w", cfg.MaxAccounts, errInvalidConfig)
 	}
 	if cfg.AccountIdleGrace == 0 {
 		cfg.AccountIdleGrace = 2 * time.Minute
@@ -152,7 +152,7 @@ func New(cfg Config, onEvent func(Event)) (*Manager, error) {
 		}
 		rooms[fold(room)] = room
 	}
-	destinationCapacity := min((cfg.MaxAccounts+1)*DestinationPoolSize+prewarmCapacity, maxRouterDestinations)
+	destinationCapacity := (cfg.MaxAccounts+1)*DestinationPoolSize + prewarmCapacity
 	openRouter := func() (*routerRuntime, error) {
 		return openRouterRuntime(cfg.StateDir, destinationCapacity)
 	}
