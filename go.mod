@@ -6,8 +6,8 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/rs/zerolog v1.35.1
-	golang.org/x/sys v0.47.0
-	gosuda.org/ivnp v0.0.0-20260911140140-13ad329b974d
+	golang.org/x/sys v0.48.0
+	gosuda.org/ivnp v0.0.0-20260911151621-a1f89464a8bf
 	gosuda.org/portalite v0.0.0-20260826135640-1f955935677b
 	modernc.org/sqlite v1.58.0
 )
@@ -23,8 +23,8 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/crypto v0.56.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	modernc.org/libc v1.75.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
