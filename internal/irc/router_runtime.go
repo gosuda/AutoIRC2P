@@ -37,7 +37,7 @@ func openRouterRuntime(stateDir string, destinationCapacity int) (*routerRuntime
 		if err := os.MkdirAll(stateDir, 0700); err != nil {
 			return nil, fmt.Errorf("create I2P state directory: %w", err)
 		}
-		cfg.Persistence = &ivnp.PersistenceConfig{Directory: stateDir}
+		cfg.Persistence = ivnp.DefaultPersistenceConfig(stateDir)
 	}
 	cfg.Limits.MaxDestinations = destinationCapacity
 	cfg.Exploratory.Inbound.Hops = defaultRouterHops
