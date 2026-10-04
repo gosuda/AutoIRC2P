@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import AuthDialog from '$lib/AuthDialog.svelte';
-  import Composer from '$lib/Composer.svelte';
-  import MessageFeed from '$lib/MessageFeed.svelte';
-  import { APIError, errorText, mergeOutgoing, request, subscribeRoom, type Cursors, type Language, type Message, type Network, type Outgoing, type Room, type RoomState, type Session, type User } from '$lib/api';
-  import { copy, languageName } from '$lib/i18n';
+  import AuthDialog from '#lib/AuthDialog.svelte';
+  import Composer from '#lib/Composer.svelte';
+  import MessageFeed from '#lib/MessageFeed.svelte';
+  import { APIError, errorText, mergeOutgoing, request, subscribeRoom, type Cursors, type Language, type Message, type Network, type Outgoing, type Room, type RoomState, type Session, type User } from '#lib/api.ts';
+  import { copy, languageName } from '#lib/i18n.ts';
 
   let language = $state<Language>('en');
   let translationEnabled = $state(false);
