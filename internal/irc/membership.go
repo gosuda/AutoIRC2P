@@ -68,3 +68,23 @@ func (m *Manager) setRoomState(account *accountConnection, room string, state Me
 	account.mu.Unlock()
 	m.onEvent(Event{Kind: "membership", AccountID: account.account.ID, Room: canonical, State: string(state)})
 }
+
+func (m *Manager) ensureRoomReady(account *accountConnection, room string) {
+	canonical, ok := m.rooms[fold(room)]
+	if !ok {
+		return
+	}
+	key := fold(canonical)
+	account.mu.Lock()
+	if account.joined[key] {
+		account.mu.Unlock()
+		return
+	}
+	if account.joined == nil {
+		account.joined = make(map[string]bool)
+	}
+	account.joined[key] = true
+	delete(account.unavailable, key)
+	account.mu.Unlock()
+	m.onEvent(Event{Kind: "membership", AccountID: account.account.ID, Room: canonical, State: string(RoomReady)})
+}

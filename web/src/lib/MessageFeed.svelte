@@ -24,17 +24,97 @@
     onresend: (send: Outgoing) => void;
     ondelete: (send: Outgoing) => void;
   } = $props();
+  type FeedItem = { kind: 'message'; key: string; createdAt: string; dayKey: string; showDay: boolean; message: Message }
+    | { kind: 'send'; key: string; createdAt: string; dayKey: string; showDay: boolean; send: Outgoing };
+
   let viewport: HTMLDivElement;
   let atBottom = $state(true);
   let disposed = false;
   let metadata: HTMLDivElement;
   let detailsAnchor: HTMLElement | undefined;
-  let details = $state<Message | Outgoing | null>(null);
+  let detailsSelection = $state<{ kind: 'message'; key: number | string } | { kind: 'send'; requestId: string } | null>(null);
   let holdTimer: number | undefined;
   let press: { id: number; x: number; y: number } | undefined;
   const text = $derived(copy[language]);
   const timeFormat = $derived(new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit' }));
-  const pending = $derived(outgoing.filter((send) => !messages.some((message) => message.own && (message.id === send.messageId || message.requestId === send.requestId))));
+  const dateFormat = $derived(new Intl.DateTimeFormat(language, { year: 'numeric', month: 'short', day: 'numeric', weekday: 'short' }));
+  const latestPersistedMessageId = $derived(messages.reduce((id, message) => message.id > id ? message.id : id, 0));
+  const pending = $derived(outgoing.filter((send) => {
+    if (messages.some((message) => message.own && (message.id === send.messageId || (send.requestId !== '' && message.requestId === send.requestId)))) {
+      return false;
+    }
+    if (send.state === 'confirmed') {
+      if (loading && messages.length === 0) return false;
+      if (send.messageId <= 0 || send.messageId <= latestPersistedMessageId) return false;
+    }
+    return true;
+  }));
+
+  function localDayKey(iso: string): string {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return '';
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+
+  function formatDay(iso: string): string {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? iso : dateFormat.format(date);
+  }
+
+  function formatTime(iso: string): string {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? '' : timeFormat.format(date);
+  }
+
+  function formatDateTime(iso: string): string {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? iso : date.toLocaleString(language);
+  }
+
+  const timeline = $derived.by(() => {
+    const raw: Array<{ kind: 'message'; key: string; createdAt: string; timeMs: number; message: Message } | { kind: 'send'; key: string; createdAt: string; timeMs: number; send: Outgoing }> = [];
+    for (const message of messages) {
+      const timeMs = Date.parse(message.createdAt);
+      raw.push({ kind: 'message', key: `msg:${messageKey(message)}`, createdAt: message.createdAt, timeMs: Number.isNaN(timeMs) ? 0 : timeMs, message });
+    }
+    for (const send of pending) {
+      const timeMs = Date.parse(send.createdAt);
+      raw.push({ kind: 'send', key: `send:${send.requestId}`, createdAt: send.createdAt, timeMs: Number.isNaN(timeMs) ? 0 : timeMs, send });
+    }
+    raw.sort((a, b) => {
+      if (a.timeMs !== b.timeMs) return a.timeMs - b.timeMs;
+      if (a.kind === 'message' && b.kind === 'message') {
+        if (a.message.id < 0 && b.message.id < 0) return b.message.id - a.message.id;
+        return a.message.id - b.message.id;
+      }
+      if (a.kind === 'send' && b.kind === 'send') {
+        return (a.send.messageId - b.send.messageId) || a.send.requestId.localeCompare(b.send.requestId);
+      }
+      return a.kind === 'message' ? -1 : 1;
+    });
+    const items: FeedItem[] = [];
+    let previousDay = '';
+    for (const entry of raw) {
+      const dayKey = localDayKey(entry.createdAt);
+      const showDay = dayKey !== '' && dayKey !== previousDay;
+      if (dayKey !== '') previousDay = dayKey;
+      if (entry.kind === 'message') {
+        items.push({ kind: 'message', key: entry.key, createdAt: entry.createdAt, dayKey, showDay, message: entry.message });
+      } else {
+        items.push({ kind: 'send', key: entry.key, createdAt: entry.createdAt, dayKey, showDay, send: entry.send });
+      }
+    }
+    return items;
+  });
+
+  const details = $derived.by<Message | Outgoing | null>(() => {
+    const selection = detailsSelection;
+    if (!selection) return null;
+    if (selection.kind === 'message') {
+      return messages.find((candidate) => messageKey(candidate) === selection.key) ?? null;
+    }
+    return outgoing.find((candidate) => candidate.requestId === selection.requestId) ?? null;
+  });
 
   function cancelPress() {
     clearTimeout(holdTimer);
@@ -49,9 +129,11 @@
     if (restoreFocus) detailsAnchor?.querySelector('button')?.focus({ preventScroll: true });
   }
 
-  async function showDetails(message: Message | Outgoing, anchor: HTMLElement) {
+  async function showDetails(item: Message | Outgoing, anchor: HTMLElement) {
     cancelPress();
-    details = message;
+    detailsSelection = 'requestId' in item && !('id' in item)
+      ? { kind: 'send', requestId: item.requestId }
+      : { kind: 'message', key: messageKey(item as Message) };
     await tick();
     if (disposed || !anchor.isConnected) return;
     detailsAnchor = anchor;
@@ -135,7 +217,7 @@
   <svg class="sent-check" viewBox="0 0 20 20" role="img" aria-label={text.sent}><title>{text.sent}</title><path d="m4 10 4 4 8-8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
 {/snippet}
 
-<svelte:window onresize={hideDetails} onblur={hideDetails} onkeydown={(event) => { if (event.key === 'Escape') hideDetails(); }} onpointerdown={(event) => { if (metadata && !metadata.contains(event.target as Node)) metadata.hidePopover(); }} />
+<svelte:window onresize={hideDetails} onblur={hideDetails} onkeydown={(event) => { if (event.key === 'Escape') hideDetails(); }} onpointerdown={(event) => { if (metadata && !metadata.contains(event.target as Node)) hideDetails(); }} />
 
 <div bind:this={metadata} popover="manual" class="message-metadata" role="dialog" aria-label={text.messageDetails}>
   {#if details}
@@ -143,7 +225,7 @@
     {#if autoTranslate && 'targetLanguage' in details && details.targetLanguage}
       <p class="message-language">{text.translation}: {languageName(details.targetLanguage, language)}</p>
     {/if}
-    <time datetime={details.createdAt}>{new Date(details.createdAt).toLocaleString(language)}</time>
+    <time datetime={details.createdAt}>{formatDateTime(details.createdAt)}</time>
     <div class="original-content"><span class="original-label">{text.original}</span><p class="message-original" dir="auto">{details.original}</p></div>
   {/if}
 </div>
@@ -154,61 +236,69 @@
       {#if error || sendsError}
         <div class="history-error" role="status"><strong>{error ? text.historyError : text.sendsError}</strong><p>{error || sendsError}</p><button type="button" onclick={onretry} disabled={loading}>{text.retry}</button></div>
       {/if}
-      {#if loading && messages.length === 0}
+      {#if loading && timeline.length === 0}
         <div class="empty-state"><span class="empty-mark" aria-hidden="true">#</span><p>{text.loadingHistory}</p></div>
-      {:else if messages.length === 0 && pending.length === 0 && !error}
+      {:else if timeline.length === 0 && !error}
         <div class="empty-state"><span class="empty-mark" aria-hidden="true">#</span><h2>{text.emptyTitle}</h2><p>{text.emptyDescription}</p></div>
       {/if}
-      {#each messages as message (messageKey(message))}
-        <article class="message" class:own-message={message.own} class:service-message={message.service} onpointerdown={(event) => pointerDown(event, message)} onpointermove={pointerMove} onpointerup={cancelPress} onpointercancel={cancelPress} onlostpointercapture={cancelPress} oncontextmenu={(event) => contextMenu(event, message)}>
-          <header class="message-header">
-            <button type="button" class="message-nick message-details-trigger" title={text.metadataHint} aria-label={`${text.messageDetails}: ${message.nick}`} onclick={(event) => void showDetails(message, event.currentTarget.closest('article')!)}>{message.own ? text.you : message.nick}</button>
-            {#if !autoTranslate}<time datetime={message.createdAt} title={new Date(message.createdAt).toLocaleString(language)}>{timeFormat.format(new Date(message.createdAt))}</time>{/if}
-            {#if message.own}{@render sentCheck()}{/if}
-          </header>
-          {#if !autoTranslate}
-            <p class="message-translation" dir="auto">{message.original}</p>
-          {:else}
-            <div class="translated-content">
-              {#if message.translationState === 'ready' && message.translation}
-                <p class="message-translation" lang={message.targetLanguage || language} dir="auto">{message.translation}</p>
-              {:else if message.translationState === 'pending'}
-                <p class="translation-status pending">{text.pending}</p>
-                <p class="message-original" dir="auto">{message.original}</p>
-              {:else if message.translationState === 'excluded' || message.service}
-                <p class="translation-status">{message.service ? text.service : text.excluded}</p>
-              {:else}
-                <p class="translation-status failed">{text.failed}</p>
-              {/if}
-            </div>
-          {/if}
-        </article>
-      {/each}
-      {#each pending as send (send.requestId)}
-        <article class="message own-message outgoing-message" class:outgoing-error={send.state === 'failed' || send.state === 'unconfirmed'} aria-label={text.outgoing} onpointerdown={(event) => pointerDown(event, send)} onpointermove={pointerMove} onpointerup={cancelPress} onpointercancel={cancelPress} onlostpointercapture={cancelPress} oncontextmenu={(event) => contextMenu(event, send)}>
-          <header class="message-header"><button type="button" class="message-nick message-details-trigger" title={text.metadataHint} aria-label={text.messageDetails} onclick={(event) => void showDetails(send, event.currentTarget.closest('article')!)}>{text.you}</button>{#if !autoTranslate}<time datetime={send.createdAt}>{timeFormat.format(new Date(send.createdAt))}</time>{/if}{#if send.state === 'confirmed'}{@render sentCheck()}{/if}</header>
-          {#if !autoTranslate || send.state !== 'confirmed'}<p class="message-original" dir="auto">{send.original}</p>{/if}
-          {#if send.state !== 'confirmed'}
-            <div class="outgoing-status" role="status">
-              {#if send.state === 'translating'}{translationEnabled ? text.translating : text.sending}
-              {:else if send.state === 'sending' || send.state === 'awaiting_echo'}{text.awaitingEcho}
-              {:else if send.state === 'failed'}{text.sendFailed}
-              {:else}{text.unconfirmed}{/if}
-            </div>
-            <div class="outgoing-actions">
-              {#if send.state === 'unconfirmed' || send.state === 'awaiting_echo'}<button type="button" class="text-button" disabled={checking[send.requestId] || recovering[send.requestId]} onclick={() => oncheck(send)}>{checking[send.requestId] ? text.checking : text.checkStatus}</button>{/if}
-              {#if send.state === 'failed' || send.state === 'unconfirmed'}
-                <button type="button" class="text-button" disabled={!ready || recovering[send.requestId] || checking[send.requestId] || submitting[send.room]} onclick={() => onresend(send)}>{text.resend}</button>
-                <button type="button" class="text-button" disabled={recovering[send.requestId] || checking[send.requestId] || submitting[send.room]} onclick={() => ondelete(send)}>{text.deleteSend}</button>
-                <button type="button" class="text-button" onclick={() => onrestore(send)}>{text.restoreDraft}</button>
-              {/if}
-            </div>
-          {/if}
-        </article>
+      {#each timeline as item (item.key)}
+        {#if item.showDay}
+          <div class="date-divider" role="separator" aria-label={formatDay(item.createdAt)}><span>{formatDay(item.createdAt)}</span></div>
+        {/if}
+        {#if item.kind === 'message'}
+          {@const message = item.message}
+          <article class="message" class:own-message={message.own} class:service-message={message.service} onpointerdown={(event) => pointerDown(event, message)} onpointermove={pointerMove} onpointerup={cancelPress} onpointercancel={cancelPress} onlostpointercapture={cancelPress} oncontextmenu={(event) => contextMenu(event, message)}>
+            <header class="message-header">
+              <button type="button" class="message-nick message-details-trigger" title={text.metadataHint} aria-label={`${text.messageDetails}: ${message.nick}`} onclick={(event) => void showDetails(message, event.currentTarget.closest('article')!)}>{message.own ? text.you : message.nick}</button>
+              <time datetime={message.createdAt} title={formatDateTime(message.createdAt)}>{formatTime(message.createdAt)}</time>
+              {#if message.own}{@render sentCheck()}{/if}
+            </header>
+            {#if !autoTranslate}
+              <p class="message-translation" dir="auto">{message.original}</p>
+            {:else}
+              <div class="translated-content">
+                {#if message.translationState === 'ready' && message.translation}
+                  <p class="message-translation" lang={message.targetLanguage || language} dir="auto">{message.translation}</p>
+                {:else if message.translationState === 'pending'}
+                  <p class="translation-status pending">{text.pending}</p>
+                  <p class="message-original" dir="auto">{message.original}</p>
+                {:else if message.translationState === 'excluded' || message.service}
+                  <p class="translation-status">{message.service ? text.service : text.excluded}</p>
+                  <p class="message-original" dir="auto">{message.original}</p>
+                {:else}
+                  <p class="translation-status failed">{text.failed}</p>
+                  <p class="message-original" dir="auto">{message.original}</p>
+                {/if}
+              </div>
+            {/if}
+          </article>
+        {:else}
+          {@const send = item.send}
+          <article class="message own-message outgoing-message" class:outgoing-error={send.state === 'failed' || send.state === 'unconfirmed'} aria-label={text.outgoing} onpointerdown={(event) => pointerDown(event, send)} onpointermove={pointerMove} onpointerup={cancelPress} onpointercancel={cancelPress} onlostpointercapture={cancelPress} oncontextmenu={(event) => contextMenu(event, send)}>
+            <header class="message-header"><button type="button" class="message-nick message-details-trigger" title={text.metadataHint} aria-label={text.messageDetails} onclick={(event) => void showDetails(send, event.currentTarget.closest('article')!)}>{text.you}</button><time datetime={send.createdAt} title={formatDateTime(send.createdAt)}>{formatTime(send.createdAt)}</time>{#if send.state === 'confirmed'}{@render sentCheck()}{/if}</header>
+            <p class:message-translation={send.state === 'confirmed'} class:message-original={send.state !== 'confirmed'} dir="auto">{send.original}</p>
+            {#if send.state !== 'confirmed'}
+              <div class="outgoing-status" role="status">
+                {#if send.state === 'translating'}{translationEnabled ? text.translating : text.sending}
+                {:else if send.state === 'sending' || send.state === 'awaiting_echo'}{text.awaitingEcho}
+                {:else if send.state === 'failed'}{text.sendFailed}
+                {:else}{text.unconfirmed}{/if}
+              </div>
+              <div class="outgoing-actions">
+                {#if send.state === 'unconfirmed' || send.state === 'awaiting_echo'}<button type="button" class="text-button" disabled={checking[send.requestId] || recovering[send.requestId]} onclick={() => oncheck(send)}>{checking[send.requestId] ? text.checking : text.checkStatus}</button>{/if}
+                {#if send.state === 'failed' || send.state === 'unconfirmed'}
+                  <button type="button" class="text-button" disabled={!ready || recovering[send.requestId] || checking[send.requestId] || submitting[send.room]} onclick={() => onresend(send)}>{text.resend}</button>
+                  <button type="button" class="text-button" disabled={recovering[send.requestId] || checking[send.requestId] || submitting[send.room]} onclick={() => ondelete(send)}>{text.deleteSend}</button>
+                  <button type="button" class="text-button" onclick={() => onrestore(send)}>{text.restoreDraft}</button>
+                {/if}
+              </div>
+            {/if}
+          </article>
+        {/if}
       {/each}
     </div>
   </div>
-  {#if !atBottom && (messages.length > 0 || pending.length > 0)}
+  {#if !atBottom && timeline.length > 0}
     <button type="button" class="latest-button" onclick={() => { atBottom = true; viewport.scrollTop = viewport.scrollHeight; reportRead(); }}>{text.latest} <span aria-hidden="true">↓</span></button>
   {/if}
 </div>

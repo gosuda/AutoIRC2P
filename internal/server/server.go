@@ -242,9 +242,6 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		log.Error().Err(err).Msg("persist IRC message")
 		return
 	}
-	if confirmed != nil {
-		s.publishSend(*confirmed)
-	}
 	s.outgoingMu.Unlock()
 	languages := []string{"original"}
 	if s.translator != nil {
@@ -256,6 +253,9 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		if msg.TranslationState == "pending" && s.hasReaders(row.Room, lang) {
 			s.enqueue(msg, lang)
 		}
+	}
+	if confirmed != nil {
+		s.publishSend(*confirmed)
 	}
 	s.refreshRoom(ctx, row.Room)
 }

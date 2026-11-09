@@ -82,3 +82,57 @@ func TestRoomReadinessRequiresJoinAndTracksRemoval(t *testing.T) {
 		}
 	})
 }
+
+func TestRoomReadinessAcceptsNamesEndAndTruncatedWelcomeNick(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		client, peer := net.Pipe()
+		if err := peer.SetDeadline(time.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		events := make(chan Event, 32)
+		account := &accountConnection{ctx: ctx, account: Account{ID: 0, Nick: "observer"}, joined: make(map[string]bool)}
+		manager := &Manager{ctx: ctx, started: true, cfg: Config{Rooms: []string{"#first", "#second"}}, rooms: map[string]string{"#first": "#first", "#second": "#second"}, accounts: map[int64]*accountConnection{0: account}, onEvent: func(event Event) { events <- event }}
+		done := make(chan error, 1)
+		go func() { done <- manager.serveConnection(account, &wireConnection{Conn: client}) }()
+		defer func() {
+			cancel()
+			if err := peer.Close(); err != nil {
+				t.Error(err)
+			}
+			<-done
+		}()
+		reader := bufio.NewReader(peer)
+		nickLine, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+		fullNick := nickLine[len("NICK ") : len(nickLine)-2]
+		truncatedNick := fullNick[:9]
+		if _, err := io.WriteString(peer, ":irc.example.i2p 001 "+truncatedNick+" :Welcome\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			if _, err := reader.ReadString('\n'); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := io.WriteString(peer, ":irc.example.i2p 366 "+truncatedNick+" #first :End of /NAMES list.\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if got := manager.RoomState(0, "#first"); got != RoomReady {
+			t.Fatalf("#first readiness after 366 = %s, want ready", got)
+		}
+		if _, err := io.WriteString(peer, ":bob!u@host PRIVMSG #second :hello from second\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if got := manager.RoomState(0, "#second"); got != RoomReady {
+			t.Fatalf("#second readiness after channel PRIVMSG = %s, want ready", got)
+		}
+	})
+}

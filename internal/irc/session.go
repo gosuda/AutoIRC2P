@@ -115,9 +115,10 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			case "432", "433", "436":
 				return m.serverRefusal(state, msg, errNickUnavailable)
 			case "001":
-				if welcome || len(msg.params) < 1 || fold(msg.params[0]) != fold(sessionNick) {
+				if welcome || len(msg.params) < 1 || !matchesWelcomeNick(sessionNick, msg.params[0]) {
 					continue
 				}
+				sessionNick = msg.params[0]
 				welcome = true
 				service.server = msg.prefix
 				var err error
@@ -128,7 +129,15 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 				joins.Go(func() {
 					m.keepalive(joinCtx, state.account.ID, conn, min(keepaliveInterval, max(time.Nanosecond, idleTimeout/2)), pongTimeout)
 				})
-			case "403", "405", "471", "473", "474", "475", "477", "489":
+			case "353":
+				if len(msg.params) >= 3 && fold(msg.params[0]) == fold(sessionNick) {
+					m.ensureRoomReady(state, msg.params[2])
+				}
+			case "366":
+				if len(msg.params) >= 2 && fold(msg.params[0]) == fold(sessionNick) {
+					m.ensureRoomReady(state, msg.params[1])
+				}
+			case "403", "405", "470", "471", "473", "474", "475", "477", "489":
 				if len(msg.params) > 1 {
 					m.setRoomState(state, msg.params[1], RoomUnavailable)
 				}
@@ -159,7 +168,6 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 			}
 		}
 		if action.registered {
-			state.account.Registered = true
 			m.onEvent(Event{AccountID: state.account.ID, Kind: "registered", Service: true})
 		}
 		if len(msg.params) == 0 {
@@ -202,8 +210,18 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 		if !ok || state.account.ID != 0 || !validNick(nick) {
 			continue
 		}
+		m.ensureRoomReady(state, room)
 		m.onEvent(Event{AccountID: 0, Room: room, Nick: nick, Text: text, Service: isService, Kind: "message"})
 	}
+}
+
+func matchesWelcomeNick(expected, actual string) bool {
+	if !validNick(actual) {
+		return false
+	}
+	foldedExpected := fold(expected)
+	foldedActual := fold(actual)
+	return foldedActual == foldedExpected || strings.HasPrefix(foldedExpected, foldedActual)
 }
 
 func (m *Manager) keepalive(ctx context.Context, accountID int64, conn *wireConnection, interval, timeout time.Duration) {

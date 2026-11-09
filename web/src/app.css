@@ -183,6 +183,8 @@ details.network-panel { display: block; font-size: var(--text-xs); }
 .network-panel summary { cursor: pointer; min-height: 32px; padding-block: var(--space-xs); color: var(--color-muted); }
 .network-panel[open] > :not(summary) { margin-top: var(--space-sm); }
 .connection-retry { padding-block: 0; min-height: 32px; font-size: var(--text-xs); }
+.date-divider { display: flex; align-items: center; gap: var(--space-md); margin-block: var(--space-lg) var(--space-sm); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
+.date-divider::before, .date-divider::after { content: ''; flex: 1; border-top: var(--rule-width) solid var(--color-rule); }
 .message { width: fit-content; min-width: min(18rem, 100%); max-width: 92%; margin-block: var(--space-md); padding: var(--space-md) var(--space-lg); border: var(--rule-width) solid var(--color-rule); border-radius: var(--radius-md); background: var(--color-panel); }
 .message:last-child { border-bottom: var(--rule-width) solid var(--color-rule); }
 .own-message { margin-inline-start: auto; background: var(--color-accent-surface); }

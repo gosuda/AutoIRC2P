@@ -128,8 +128,12 @@ func (s *Service) Register(ctx context.Context, nick, proof string) (store.User,
 	return user, nil
 }
 func IsServiceNick(nick string) bool {
-	switch strings.ToLower(nick) {
-	case "nickserv", "chanserv", "memoserv", "operserv", "hostserv", "botserv", "helpserv":
+	lower := strings.ToLower(nick)
+	if strings.HasPrefix(lower, "irc2pguest") {
+		return true
+	}
+	switch lower {
+	case "nickserv", "chanserv", "memoserv", "operserv", "hostserv", "botserv", "helpserv", "global":
 		return true
 	}
 	return false

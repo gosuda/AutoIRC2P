@@ -59,3 +59,14 @@ func TestUnconfiguredRoomCannotSend(t *testing.T) {
 		t.Fatalf("unconfigured room error = %v", err)
 	}
 }
+
+func TestParseFrameAcceptsExtendedISupportParameters(t *testing.T) {
+	line := ":irc.example.i2p 005 guest CALLERID CASEMAPPING=rfc1459 DEAF=D KICKLEN=180 MODES=4 NICKLEN=30 PREFIX=(qaohv)~&@%+ STATUSMSG=~&@%+ TOPICLEN=390 NETWORK=Irc2P MAXLIST=b:60,e:60,I:60 MAXTARGETS=4 CHANTYPES=# CHANLIMIT=#:120 CHANNELLEN=50 :are supported by this server"
+	msg, err := parseFrame(line)
+	if err != nil {
+		t.Fatalf("parseFrame rejected 005 RPL_ISUPPORT frame with >15 params: %v", err)
+	}
+	if msg.command != "005" || len(msg.params) != 17 || msg.params[16] != "are supported by this server" {
+		t.Fatalf("parsed 005 frame = %+v", msg)
+	}
+}

@@ -53,7 +53,7 @@
   const autoTranslate = $derived(translationEnabled && autoTranslatePreference);
   const room = $derived(rooms.find((candidate) => candidate.name === roomName));
   const ready = $derived(!!user && subscription === 'live' && room?.sendState === 'ready');
-  const visibleOutgoing = $derived(Object.values(outgoing).filter((send) => send.room === roomName && !send.dismissed && (['confirmed', 'failed', 'unconfirmed'].includes(send.state) || Date.parse(send.expiresAt) > now)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)));
+  const visibleOutgoing = $derived(Object.values(outgoing).filter((send) => send.room === roomName && !send.dismissed && (['confirmed', 'failed', 'unconfirmed'].includes(send.state) || Date.parse(send.expiresAt) > now)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || (a.messageId - b.messageId) || a.requestId.localeCompare(b.requestId)));
   const draft = $derived(drafts[roomName] ?? '');
   const busy = $derived(!!submitting[roomName] || visibleOutgoing.some((send) => send.original === draft && ['translating', 'sending', 'awaiting_echo'].includes(send.state)));
   const composeError = $derived((sendErrors[roomName]?.expiresAt ?? 0) > now ? sendErrors[roomName].message : '');
@@ -162,7 +162,7 @@
     locallySubmitted = new Set();
     subscription = 'connecting';
     historyLoading = true;
-    historyError = sendsError = '';
+    actionError = historyError = sendsError = '';
     search = '';
     showAll = true;
     favoritesOnly = false;
@@ -177,7 +177,13 @@
       autoTranslatePreference = stored.autoTranslate;
       storageError = false;
     } catch { storageError = true; }
-    roomName = mostRecentRoomName();
+    if (rooms.length > 0) {
+      const defaultSendState: Room['sendState'] = next ? 'preparing' : 'login_required';
+      receiveRooms(rooms.map((candidate) => ({ ...candidate, sendState: defaultSendState })), true);
+    }
+    if (!roomName || !rooms.some((candidate) => candidate.name === roomName)) {
+      roomName = mostRecentRoomName();
+    }
     reconnectVersion++;
   }
 
@@ -215,13 +221,22 @@
     now = Date.now();
     const next = { ...outgoing };
     let refreshConfirmed = false;
-    for (const incoming of sends) {
+    for (const raw of sends) {
+      let incoming = raw;
+      if (incoming.state !== 'confirmed' && incoming.room === roomName) {
+        const matched = messages.find((message) => message.own && ((incoming.messageId > 0 && message.id === incoming.messageId) || (incoming.requestId !== '' && message.requestId === incoming.requestId)));
+        if (matched) {
+          incoming = { ...incoming, state: 'confirmed', messageId: matched.id, createdAt: matched.createdAt };
+        }
+      }
       const previous = next[incoming.requestId];
       const send = mergeOutgoing(previous, incoming);
       next[send.requestId] = send;
       if (send.state === 'confirmed' && previous?.state !== 'confirmed') {
         if (locallySubmitted.delete(send.requestId) && drafts[send.room] === send.original) drafts = { ...drafts, [send.room]: '' };
-        if (send.room === roomName) refreshConfirmed = true;
+        if (send.room === roomName && !messages.some((message) => message.own && (message.id === send.messageId || message.requestId === send.requestId))) {
+          refreshConfirmed = true;
+        }
       }
     }
     outgoing = next;
@@ -245,8 +260,11 @@
     const signal = sessionController.signal;
     restoring = true;
     sessionError = '';
+    actionError = '';
     try {
-      const session = await request<Session>('/api/session', { signal });
+      const hasCursors = Object.keys(cursors).length > 0;
+      const sessionPath = hasCursors ? `/api/session?cursors=${encodeURIComponent(JSON.stringify(cursors))}` : '/api/session';
+      const session = await request<Session>(sessionPath, { signal });
       if (signal.aborted) return;
       rooms = session.rooms;
       network = session.network;
@@ -255,7 +273,9 @@
       receiveRooms(session.rooms, true);
       if (!initialized || !rooms.some((candidate) => candidate.name === roomName)) roomName = mostRecentRoomName();
       initialized = true;
-      if (!active) reconnectVersion++;
+      active?.stop();
+      active = undefined;
+      reconnectVersion++;
     } catch (error) {
       if (!signal.aborted) sessionError = errorText(error);
     } finally {
@@ -326,11 +346,15 @@
         onIdentityMismatch: refreshAccount,
         onMessages: (incoming) => {
           messages = incoming;
+          const confirmedSends: Outgoing[] = [];
           for (const message of incoming) {
             if (!message.own || !message.requestId || !outgoing[message.requestId]) continue;
             const send = outgoing[message.requestId];
-            if (send.state !== 'confirmed') receiveSends([{ ...send, state: 'confirmed', messageId: message.id }]);
+            if (send.state !== 'confirmed') {
+              confirmedSends.push({ ...send, state: 'confirmed', messageId: message.id, createdAt: message.createdAt });
+            }
           }
+          if (confirmedSends.length > 0) receiveSends(confirmedSends);
         },
         onRooms: receiveRooms,
         onRoomStates: receiveRoomStates,
@@ -380,7 +404,12 @@
       const result = await request<{ send: Outgoing }>(`/api/sends/${encodeURIComponent(send.requestId)}`, { signal: accountController.signal });
       if (epoch === accountEpoch) receiveSends([result.send]);
     } catch (error) {
-      if (epoch === accountEpoch) setSendError(send.room, sendFailureText(error));
+      if (epoch === accountEpoch) {
+        if (send.clientOnly && error instanceof APIError && error.status === 404) {
+          receiveSends([{ ...send, state: 'failed', errorCode: 'not_sent' }]);
+        }
+        setSendError(send.room, sendFailureText(error));
+      }
     } finally {
       if (epoch === accountEpoch) checking = { ...checking, [send.requestId]: false };
     }
@@ -426,8 +455,12 @@
     const epoch = accountEpoch;
     const requestId = crypto.randomUUID();
     const started = Date.now();
-    const provisional: Outgoing = { requestId, room: selectedRoom, original: content, originalMode, dismissed: false, clientOnly: true, state: 'unconfirmed', messageId: 0, createdAt: new Date(started).toISOString(), expiresAt: new Date(started + 120000).toISOString(), errorCode: 'send_unconfirmed' };
+    const createdAt = new Date(started).toISOString();
+    const expiresAt = new Date(started + 120000).toISOString();
+    const optimistic: Outgoing = { requestId, room: selectedRoom, original: content, originalMode, dismissed: false, clientOnly: true, state: originalMode || !translationEnabled ? 'sending' : 'translating', messageId: 0, createdAt, expiresAt, errorCode: '' };
+    const provisional: Outgoing = { ...optimistic, state: 'unconfirmed', errorCode: 'send_unconfirmed' };
     locallySubmitted.add(requestId);
+    receiveSends([optimistic]);
     submitting = { ...submitting, [selectedRoom]: true };
     sendErrors = { ...sendErrors, [selectedRoom]: { message: '', expiresAt: 0 } };
     try {
@@ -449,7 +482,7 @@
           const result = await request<{ send: Outgoing }>(`/api/sends/${encodeURIComponent(requestId)}`, { signal: AbortSignal.any([accountController.signal, AbortSignal.timeout(10000)]) });
           if (epoch === accountEpoch) receiveSends([result.send]);
         } catch {
-          if (epoch === accountEpoch && !outgoing[requestId]) receiveSends([provisional]);
+          if (epoch === accountEpoch) receiveSends([provisional]);
         }
       }
       if (epoch !== accountEpoch) return;
@@ -466,20 +499,22 @@
     actionError = '';
     try {
       await request<void>('/api/auth/logout', { method: 'POST' });
+      sessionController?.abort();
       notifyAccountChange();
       initialized = rooms.length > 0;
       switchAccount(null);
-      await restoreSession();
+      if (!initialized) await restoreSession();
     } catch (error) { actionError = errorText(error); }
     finally { loggingOut = false; }
   }
 
   function authenticated(next: User) {
+    sessionController?.abort();
     initialized = rooms.length > 0;
     switchAccount(next);
     authMode = null;
     notifyAccountChange();
-    void restoreSession();
+    if (!initialized) void restoreSession();
   }
 
   function toggleFavorite(name: string) {

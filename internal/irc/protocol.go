@@ -87,7 +87,7 @@ func parseFrame(line string) (frame, error) {
 		if line == "" {
 			break
 		}
-		if len(msg.params) == 15 {
+		if len(msg.params) == 64 {
 			return frame{}, errMalformedFrame
 		}
 		if line[0] == ':' {

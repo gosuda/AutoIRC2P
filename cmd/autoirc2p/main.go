@@ -111,7 +111,6 @@ func run() (err error) {
 		if err = bridge.Start(ctx); err != nil {
 			return err
 		}
-		prewarmAccounts(ctx, queries, accounts, bridge)
 		observer, err := accounts.Observer(ctx)
 		if err != nil {
 			return err
@@ -125,6 +124,7 @@ func run() (err error) {
 		if err != nil {
 			return err
 		}
+		prewarmAccounts(ctx, queries, accounts, bridge)
 	} else {
 		app.Event(ctx, irc.Event{Kind: "status", State: "disconnected", Text: "IRC_OFFLINE is enabled"})
 	}

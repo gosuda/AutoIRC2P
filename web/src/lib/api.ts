@@ -158,6 +158,7 @@ export function subscribeRoom(options: {
   let cacheKey = JSON.stringify([options.userId, currentRoom, currentLang]);
   const cached = options.historyCache.get(cacheKey);
   let requestController = new AbortController();
+  let sendsController = new AbortController();
   let socket: WebSocket | undefined;
   let verifiedSocket: WebSocket | undefined;
   let retryTimer: number | undefined;
@@ -172,11 +173,18 @@ export function subscribeRoom(options: {
   let messages = new Map<number | string, Message>((cached ?? []).map((message) => [messageKey(message), message]));
   let duringHistory = new Map<number | string, Message>();
 
+  function compareMessages(a: Message, b: Message): number {
+    const timeDiff = Date.parse(a.createdAt) - Date.parse(b.createdAt);
+    if (timeDiff !== 0) return timeDiff;
+    if (a.id < 0 && b.id < 0) return b.id - a.id;
+    return a.id - b.id;
+  }
+
   function publish() {
     const visible = [...messages.values()].filter((message) => {
       const nick = message.nick.toLowerCase();
       return nick !== 'nickserv' && nick !== 'chanserv';
-    }).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id - b.id);
+    }).sort(compareMessages);
     if (historyKnown || visible.length > 0) {
       options.historyCache.delete(cacheKey);
       options.historyCache.set(cacheKey, visible.filter((message) => message.id > 0).slice(-maxCachedMessages));
@@ -198,6 +206,7 @@ export function subscribeRoom(options: {
     if (stopped) return;
     stopped = true;
     requestController.abort();
+    sendsController.abort();
     clearTimeout(retryTimer);
     clearTimeout(readTimer);
     pendingReads.clear();
@@ -262,8 +271,10 @@ export function subscribeRoom(options: {
 
   async function refreshSends() {
     if (!options.userId) return;
+    sendsController.abort();
+    sendsController = new AbortController();
     const targetRoom = currentRoom;
-    const signal = requestController.signal;
+    const signal = sendsController.signal;
     try {
       const data = await request<{ sends: Outgoing[] }>(`/api/sends?room=${encodeURIComponent(targetRoom)}`, { signal });
       if (!stopped && !signal.aborted && targetRoom === currentRoom) {
@@ -307,6 +318,10 @@ export function subscribeRoom(options: {
     cacheKey = JSON.stringify([options.userId, currentRoom, currentLang]);
     requestController.abort();
     requestController = new AbortController();
+    if (roomChanged) {
+      sendsController.abort();
+      sendsController = new AbortController();
+    }
     historyPending = false;
     refreshAfterHistory = false;
     latestRoomMessageId = 0;
