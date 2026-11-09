@@ -172,3 +172,63 @@ func TestAddressBookResolver(t *testing.T) {
 		t.Fatalf("nil resolver error = %v, want ErrNameResolutionUnavailable", err)
 	}
 }
+
+func TestAddressBookResolverColdStartBootstrapIRCHosts(t *testing.T) {
+	unsyncedBook, err := client.AddressBookNewService(client.AddressBookConfig{
+		StatePath: filepath.Join(t.TempDir(), "addressbook.json"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := errors.Join(unsyncedBook.Close(), unsyncedBook.Wait()); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	for _, tc := range []struct {
+		name string
+		book *client.AddressBookService
+	}{
+		{name: "unsynced addressbook", book: unsyncedBook},
+		{name: "in-memory resolver", book: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver := newAddressBookResolver(tc.book)
+			for _, host := range []string{"irc.postman.i2p", "IRC.POSTMAN.I2P.", "irc.echelon.i2p", "irc.dg.i2p", "irc.00.i2p"} {
+				hash, err := resolver.LookupDestination(t.Context(), host)
+				if err != nil {
+					t.Fatalf("LookupDestination(%q) error = %v", host, err)
+				}
+				if hash == (ivnp.Hash{}) {
+					t.Fatalf("LookupDestination(%q) returned zero hash", host)
+				}
+			}
+			if _, err := resolver.LookupDestination(t.Context(), "unknown.example.i2p"); err == nil {
+				t.Fatal("LookupDestination(unknown.example.i2p) unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func BenchmarkAddressBookColdStartLookup(b *testing.B) {
+	book, err := client.AddressBookNewService(client.AddressBookConfig{
+		StatePath: filepath.Join(b.TempDir(), "addressbook.json"),
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() {
+		_ = book.Close()
+		_ = book.Wait()
+	}()
+	resolver := newAddressBookResolver(book)
+	ctx := b.Context()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := resolver.LookupDestination(ctx, "irc.postman.i2p"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

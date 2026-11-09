@@ -255,7 +255,7 @@
       receiveRooms(session.rooms, true);
       if (!initialized || !rooms.some((candidate) => candidate.name === roomName)) roomName = mostRecentRoomName();
       initialized = true;
-      reconnectVersion++;
+      if (!active) reconnectVersion++;
     } catch (error) {
       if (!signal.aborted) sessionError = errorText(error);
     } finally {
@@ -307,10 +307,8 @@
   });
 
   $effect(() => {
-    if (!initialized || !roomName) return;
-    const selectedRoom = roomName;
-    const selectedLanguage = language;
-    const selectedAutoTranslate = autoTranslate;
+    const hasRoom = Boolean(roomName);
+    if (!initialized || !hasRoom) return;
     const selectedUserId = user?.id ?? 0;
     reconnectVersion;
     return untrack(() => {
@@ -319,9 +317,9 @@
       historyError = sendsError = '';
       subscription = 'connecting';
       const next = subscribeRoom({
-        room: selectedRoom,
-        language: selectedLanguage,
-        autoTranslate: selectedAutoTranslate,
+        room: roomName,
+        language,
+        autoTranslate,
         userId: selectedUserId,
         historyCache,
         cursors: () => cursors,
@@ -344,6 +342,16 @@
       });
       active = next;
       return () => { next.stop(); if (active === next) active = undefined; };
+    });
+  });
+
+  $effect(() => {
+    if (!initialized || !roomName) return;
+    const selectedRoom = roomName;
+    const selectedLanguage = language;
+    const selectedAutoTranslate = autoTranslate;
+    untrack(() => {
+      active?.update(selectedRoom, selectedLanguage, selectedAutoTranslate);
     });
   });
 
@@ -459,7 +467,7 @@
     try {
       await request<void>('/api/auth/logout', { method: 'POST' });
       notifyAccountChange();
-      initialized = false;
+      initialized = rooms.length > 0;
       switchAccount(null);
       await restoreSession();
     } catch (error) { actionError = errorText(error); }
@@ -467,7 +475,7 @@
   }
 
   function authenticated(next: User) {
-    initialized = false;
+    initialized = rooms.length > 0;
     switchAccount(next);
     authMode = null;
     notifyAccountChange();

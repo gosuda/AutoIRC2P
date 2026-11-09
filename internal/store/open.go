@@ -52,7 +52,7 @@ func NewSQLite(ctx context.Context, path string) (*sql.DB, *Queries, error) {
 	}
 	db.SetMaxOpenConns(1)
 	fail := func(err error) (*sql.DB, *Queries, error) { return nil, nil, errors.Join(err, db.Close()) }
-	if _, err = db.ExecContext(ctx, "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"); err != nil {
+	if _, err = db.ExecContext(ctx, "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA busy_timeout=5000;"); err != nil {
 		return fail(err)
 	}
 	var version int

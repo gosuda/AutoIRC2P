@@ -152,11 +152,12 @@ export function subscribeRoom(options: {
   onHistory: (loading: boolean, error: string) => void;
   onIdentityMismatch: () => void;
 }) {
-  const lang = options.autoTranslate ? options.language : 'original';
-  const query = new URLSearchParams({ room: options.room, lang });
-  const cacheKey = JSON.stringify([options.userId, options.room, lang]);
+  let currentRoom = options.room;
+  let currentLang = options.autoTranslate ? options.language : 'original';
+  let query = new URLSearchParams({ room: currentRoom, lang: currentLang });
+  let cacheKey = JSON.stringify([options.userId, currentRoom, currentLang]);
   const cached = options.historyCache.get(cacheKey);
-  const controller = new AbortController();
+  let requestController = new AbortController();
   let socket: WebSocket | undefined;
   let verifiedSocket: WebSocket | undefined;
   let retryTimer: number | undefined;
@@ -167,6 +168,7 @@ export function subscribeRoom(options: {
   let historyPending = false;
   let historyKnown = cached !== undefined;
   let refreshAfterHistory = false;
+  let latestRoomMessageId = 0;
   let messages = new Map<number | string, Message>((cached ?? []).map((message) => [messageKey(message), message]));
   let duringHistory = new Map<number | string, Message>();
 
@@ -195,7 +197,7 @@ export function subscribeRoom(options: {
   function stop() {
     if (stopped) return;
     stopped = true;
-    controller.abort();
+    requestController.abort();
     clearTimeout(retryTimer);
     clearTimeout(readTimer);
     pendingReads.clear();
@@ -218,13 +220,16 @@ export function subscribeRoom(options: {
       refreshAfterHistory = true;
       return;
     }
+    const targetCacheKey = cacheKey;
+    const targetQuery = query.toString();
+    const signal = requestController.signal;
     historyPending = true;
     duringHistory = new Map();
     options.onHistory(!historyKnown, '');
     let succeeded = false;
     try {
-      const data = await request<{ userId: number; messages: Message[] }>(`/api/messages?${query}`, { signal: controller.signal });
-      if (stopped) return;
+      const data = await request<{ userId: number; messages: Message[] }>(`/api/messages?${targetQuery}`, { signal });
+      if (stopped || signal.aborted || targetCacheKey !== cacheKey) return;
       if (data.userId !== options.userId) {
         identityMismatch();
         return;
@@ -241,23 +246,32 @@ export function subscribeRoom(options: {
       publish();
       options.onHistory(false, '');
     } catch (error) {
-      if (!stopped) options.onHistory(false, errorText(error));
+      if (!stopped && !signal.aborted && targetCacheKey === cacheKey) options.onHistory(false, errorText(error));
     } finally {
-      historyPending = false;
-      duringHistory.clear();
-      const refresh = refreshAfterHistory;
-      refreshAfterHistory = false;
-      if (refresh && succeeded && !stopped) void refreshHistory();
+      if (targetCacheKey === cacheKey) {
+        historyPending = false;
+        duringHistory.clear();
+        const missingLatest = latestRoomMessageId > 0 && !messages.has(latestRoomMessageId);
+        const refresh = refreshAfterHistory || missingLatest;
+        refreshAfterHistory = false;
+        if (missingLatest) latestRoomMessageId = 0;
+        if (refresh && succeeded && !stopped) void refreshHistory();
+      }
     }
   }
 
   async function refreshSends() {
     if (!options.userId) return;
+    const targetRoom = currentRoom;
+    const signal = requestController.signal;
     try {
-      const data = await request<{ sends: Outgoing[] }>(`/api/sends?room=${encodeURIComponent(options.room)}`, { signal: controller.signal });
-      if (!stopped) { options.onSends(data.sends); options.onSendsError(''); }
+      const data = await request<{ sends: Outgoing[] }>(`/api/sends?room=${encodeURIComponent(targetRoom)}`, { signal });
+      if (!stopped && !signal.aborted && targetRoom === currentRoom) {
+        options.onSends(data.sends);
+        options.onSendsError('');
+      }
     } catch (error) {
-      if (!stopped) options.onSendsError(errorText(error));
+      if (!stopped && !signal.aborted && targetRoom === currentRoom) options.onSendsError(errorText(error));
     }
   }
 
@@ -282,9 +296,41 @@ export function subscribeRoom(options: {
     if (readTimer === undefined) readTimer = window.setTimeout(flushRead, 500);
   }
 
+  function update(nextRoom: string, nextLanguage: Language, nextAutoTranslate: boolean) {
+    const nextLang = nextAutoTranslate ? nextLanguage : 'original';
+    const roomChanged = nextRoom !== currentRoom;
+    const langChanged = nextLang !== currentLang;
+    if (!roomChanged && !langChanged) return;
+    currentRoom = nextRoom;
+    currentLang = nextLang;
+    query = new URLSearchParams({ room: currentRoom, lang: currentLang });
+    cacheKey = JSON.stringify([options.userId, currentRoom, currentLang]);
+    requestController.abort();
+    requestController = new AbortController();
+    historyPending = false;
+    refreshAfterHistory = false;
+    latestRoomMessageId = 0;
+    duringHistory.clear();
+    const nextCached = options.historyCache.get(cacheKey);
+    historyKnown = nextCached !== undefined;
+    messages = new Map<number | string, Message>((nextCached ?? []).map((message) => [messageKey(message), message]));
+    options.onHistory(!historyKnown, '');
+    if (roomChanged) options.onSendsError('');
+    publish();
+    if (socket?.readyState === WebSocket.OPEN && socket === verifiedSocket) {
+      socket.send(JSON.stringify({ type: 'subscribe', room: currentRoom, lang: currentLang }));
+    }
+    void refreshHistory();
+    if (roomChanged && socket?.readyState === WebSocket.OPEN && socket === verifiedSocket) {
+      void refreshSends();
+    }
+  }
+
   function connect() {
     if (stopped) return;
     options.onSubscription(retries ? 'reconnecting' : 'connecting');
+    const subscribedRoom = currentRoom;
+    const subscribedLang = currentLang;
     const socketQuery = new URLSearchParams(query);
     socketQuery.set('cursors', JSON.stringify(options.cursors()));
     const url = new URL(`/api/ws?${socketQuery}`, location.href);
@@ -302,8 +348,10 @@ export function subscribeRoom(options: {
           return;
         }
         verifiedSocket = current;
-        // Refresh after subscription to recover the gap since the HTTP snapshot.
-        void refreshHistory();
+        if (currentRoom !== subscribedRoom || currentLang !== subscribedLang) {
+          current.send(JSON.stringify({ type: 'subscribe', room: currentRoom, lang: currentLang }));
+        }
+        if (retries > 0) void refreshHistory();
         void refreshSends();
         return;
       }
@@ -312,6 +360,11 @@ export function subscribeRoom(options: {
         options.onRooms(frame.rooms, true);
         retries = 0;
         options.onSubscription('live');
+        const currentSummary = frame.rooms.find((candidate) => candidate.name === currentRoom);
+        if (currentSummary && currentSummary.latestMessageId > 0 && !messages.has(currentSummary.latestMessageId)) {
+          latestRoomMessageId = currentSummary.latestMessageId;
+          if (!historyPending) void refreshHistory();
+        }
       } else if (frame.type === 'room') {
         options.onRooms([frame.room], false);
       } else if (frame.type === 'roomStates') {
@@ -320,7 +373,7 @@ export function subscribeRoom(options: {
         options.onSends([frame.send]);
       } else if (frame.type === 'status') {
         options.onNetwork({ state: frame.state, detail: frame.detail });
-      } else if ((frame.type === 'message' || frame.type === 'translation') && frame.message?.room === options.room) {
+      } else if ((frame.type === 'message' || frame.type === 'translation') && frame.message?.room === currentRoom) {
         const key = messageKey(frame.message);
         const next = mergeMessage(messages.get(key), frame.message);
         messages.set(key, next);
@@ -345,6 +398,7 @@ export function subscribeRoom(options: {
   connect();
   return {
     read,
+    update,
     refresh: () => {
       void refreshHistory();
       if (socket && socket === verifiedSocket) void refreshSends();

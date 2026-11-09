@@ -246,7 +246,6 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 		s.publishSend(*confirmed)
 	}
 	s.outgoingMu.Unlock()
-	s.refreshRoom(ctx, row.Room)
 	languages := []string{"original"}
 	if s.translator != nil {
 		languages = []string{"en", "ko", "original"}
@@ -258,6 +257,7 @@ func (s *Server) receive(ctx context.Context, event irc.Event) {
 			s.enqueue(msg, lang)
 		}
 	}
+	s.refreshRoom(ctx, row.Room)
 }
 func messageFrom(row store.Message, lang string) Message {
 	msg := Message{ID: row.ID, Room: row.Room, Nick: row.Nick, Original: row.Original, TargetLanguage: lang, TranslationState: "pending", CreatedAt: time.UnixMilli(row.CreatedAt).UTC().Format(time.RFC3339Nano), Service: row.Service != 0, senderUserID: row.SenderUserID, senderRequestID: row.SenderRequestID}
@@ -387,14 +387,17 @@ func (s *Server) roomAllowed(room string) bool {
 	}
 	return false
 }
-func (s *Server) language(r *http.Request) string {
-	if s.translator == nil || r.URL.Query().Get("lang") == "original" {
+func (s *Server) normalizeLanguage(lang string) string {
+	if s.translator == nil || lang == "original" {
 		return "original"
 	}
-	if r.URL.Query().Get("lang") == "en" {
+	if lang == "en" {
 		return "en"
 	}
 	return "ko"
+}
+func (s *Server) language(r *http.Request) string {
+	return s.normalizeLanguage(r.URL.Query().Get("lang"))
 }
 func (s *Server) Handler() http.Handler {
 	scripts, err := scriptPolicy(s.cfg.WebDir)

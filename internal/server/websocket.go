@@ -99,20 +99,27 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 			var request struct {
 				Type      string `json:"type"`
 				Room      string `json:"room"`
+				Lang      string `json:"lang"`
 				MessageID int64  `json:"messageId"`
 			}
 			if err := conn.ReadJSON(&request); err != nil {
 				return
 			}
-			if request.Type != "read" {
-				return
-			}
-			if err := s.markRead(ctx, sub, request.Room, request.MessageID); err != nil {
-				if errors.Is(err, errCursorRateLimited) {
-					if err := conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "cursor rate exceeded"), time.Now().Add(10*time.Second)); err != nil {
-						log.Debug().Err(err).Msg("websocket policy close")
+			switch request.Type {
+			case "read":
+				if err := s.markRead(ctx, sub, request.Room, request.MessageID); err != nil {
+					if errors.Is(err, errCursorRateLimited) {
+						if err := conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "cursor rate exceeded"), time.Now().Add(10*time.Second)); err != nil {
+							log.Debug().Err(err).Msg("websocket policy close")
+						}
 					}
+					return
 				}
+			case "subscribe":
+				if err := s.updateSubscription(sub, request.Room, request.Lang); err != nil {
+					return
+				}
+			default:
 				return
 			}
 		}

@@ -272,3 +272,66 @@ func TestExpiredSendRemainsActionableWithoutReleasingIdempotencyClaim(t *testing
 		t.Fatalf("real late echo hidden: %+v %v", visible, err)
 	}
 }
+
+func BenchmarkSendAndEchoConfirmation(b *testing.B) {
+	db, q, err := NewSQLite(b.Context(), filepath.Join(b.TempDir(), "bench.sqlite"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	user, err := q.CreateUser(b.Context(), CreateUserParams{
+		Email: "alice@example.org", Nick: "alice",
+		PasswordSalt: []byte{1}, PasswordHash: []byte{1},
+		IrcPassword: []byte{1}, IdentityKeys: []byte{1},
+		IdentityAddress: "alice.b32.i2p",
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := b.Context()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		reqID := fmt.Sprintf("bench_req_%08d", i)
+		now := int64(1000 + i)
+		if _, err := q.ClaimSend(ctx, ClaimSendParams{
+			UserID: user.ID, RequestID: reqID, Room: "#i2p", Nick: "alice",
+			Original: "benchmark message", State: "sending",
+			CreatedAt: now, UpdatedAt: now, ExpiresAt: now + 120000,
+		}); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := q.PrepareSend(ctx, PrepareSendParams{
+			WireText: "benchmark message", UpdatedAt: now, UserID: user.ID, RequestID: reqID,
+		}); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := q.FinishSend(ctx, FinishSendParams{
+			State: "awaiting_echo", UpdatedAt: now, ExpiresAt: now + 120000,
+			UserID: user.ID, RequestID: reqID,
+		}); err != nil {
+			b.Fatal(err)
+		}
+		if err := q.Transaction(ctx, func(tx *Queries) error {
+			echo, err := tx.PendingEcho(ctx, PendingEchoParams{
+				Room: "#i2p", Nick: "alice", WireText: "benchmark message", CreatedAt: 0,
+			})
+			if err != nil {
+				return err
+			}
+			msg, err := tx.AddMessage(ctx, AddMessageParams{
+				Room: "#i2p", Nick: "alice", Original: echo.Original,
+				CreatedAt: now, SenderUserID: echo.UserID, SenderRequestID: echo.RequestID,
+			})
+			if err != nil {
+				return err
+			}
+			_, err = tx.ConsumeEcho(ctx, ConsumeEchoParams{
+				MessageID: msg.ID, UpdatedAt: now, UserID: echo.UserID, RequestID: echo.RequestID,
+			})
+			return err
+		}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

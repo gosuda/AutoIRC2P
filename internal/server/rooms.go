@@ -181,19 +181,55 @@ func (s *Server) refreshRoomStates(name string, userID int64) {
 	}
 }
 
+type roomSummaryKey struct {
+	userID    int64
+	cursor    int64
+	hasCursor bool
+}
+
 func (s *Server) refreshRoom(ctx context.Context, name string) {
-	for _, sub := range s.subscriptionsFor(0) {
+	subs := s.subscriptionsFor(0)
+	if len(subs) == 0 {
+		return
+	}
+	cached := make(map[roomSummaryKey]store.RoomSummary, len(subs))
+	for _, sub := range subs {
 		sub.cursorMu.Lock()
-		room, err := s.roomMetadata(ctx, sub.userID, name, sub.cursors)
+		cursor, hasCursor := sub.cursors[name]
+		key := roomSummaryKey{userID: sub.userID, cursor: cursor, hasCursor: hasCursor}
+		summary, ok := cached[key]
+		var err error
+		if !ok {
+			var summaries []store.RoomSummary
+			summaries, err = s.q.RoomSummaries(ctx, []string{name}, sub.cursors, sub.userID)
+			if err == nil {
+				summary = summaries[0]
+				cached[key] = summary
+			}
+		}
 		if err != nil {
 			log.Error().Err(err).Msg("refresh room metadata")
 			sub.close()
 		} else {
+			sub.cursors[name] = summary.Cursor
+			room := s.roomFromSummary(sub.userID, summary)
 			sub.rememberRoomState(room)
 			sub.push(frame{Type: "room", Room: &room})
 		}
 		sub.cursorMu.Unlock()
 	}
+}
+
+func (s *Server) updateSubscription(sub *subscription, room, lang string) error {
+	if !s.roomAllowed(room) {
+		return errInvalidCursors
+	}
+	normalized := s.normalizeLanguage(lang)
+	s.mu.Lock()
+	sub.room = room
+	sub.lang = normalized
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Server) markRead(ctx context.Context, sub *subscription, room string, id int64) error {

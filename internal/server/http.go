@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"math"
 	"net/http"
@@ -12,8 +13,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/gosuda/AutoIRC2P/internal/auth"
+	"github.com/gosuda/AutoIRC2P/internal/irc"
 	"github.com/gosuda/AutoIRC2P/internal/store"
+	"github.com/gosuda/AutoIRC2P/internal/translate"
+	"github.com/rs/zerolog/log"
 )
+
+type prewarmBridge interface {
+	Prewarm(context.Context, irc.Account) error
+}
 
 func stringID(id int64) string { return strconv.FormatInt(id, 10) }
 func (s *Server) currentUser(r *http.Request) (store.User, error) {
@@ -23,9 +31,24 @@ func (s *Server) currentUser(r *http.Request) (store.User, error) {
 	}
 	return s.auth.Session(r.Context(), cookie.Value)
 }
+func (s *Server) prewarm(ctx context.Context, user store.User) {
+	warmer, ok := s.bridge.(prewarmBridge)
+	if !ok || user.ID <= 0 {
+		return
+	}
+	account, err := s.auth.Account(ctx, user)
+	if err != nil {
+		return
+	}
+	defer account.ReleaseSensitive()
+	if err := warmer.Prewarm(s.lifetime, account); err != nil {
+		log.Debug().Err(err).Int64("account_id", user.ID).Msg("prewarm IRC account")
+	}
+}
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	var user *auth.User
 	if row, err := s.currentUser(r); err == nil {
+		s.prewarm(r.Context(), row)
 		u := auth.Public(row)
 		user = &u
 	}
@@ -111,6 +134,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, user store
 		writeError(w, 500, "session unavailable")
 		return
 	}
+	s.prewarm(r.Context(), user)
 	http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true, Secure: s.cfg.SecureCookies, SameSite: http.SameSiteStrictMode, MaxAge: 7 * 24 * 60 * 60})
 	writeJSON(w, 200, map[string]any{"user": auth.Public(user)})
 }
@@ -147,8 +171,27 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	messages := make([]Message, 0, len(rows))
 	lang := s.language(r)
 	viewer, _ := s.currentUser(r)
+	var cachedByKey map[string]string
 	for i := len(rows) - 1; i >= 0; i-- {
 		msg := messageFrom(rows[i], lang)
+		if msg.TranslationState == "pending" {
+			if key, ok := translate.CacheKey(msg.Original, lang); ok {
+				if cachedByKey == nil {
+					cachedByKey = make(map[string]string, len(rows))
+				}
+				cached, seen := cachedByKey[key]
+				if !seen {
+					if value, err := s.q.GetTranslation(r.Context(), key); err == nil && strings.TrimSpace(value) != "" {
+						cached = value
+					}
+					cachedByKey[key] = cached
+				}
+				if cached != "" {
+					msg.Translation = cached
+					msg.TranslationState = "ready"
+				}
+			}
+		}
 		messages = append(messages, personalize(msg, viewer.ID))
 	}
 	writeJSON(w, 200, map[string]any{"userId": viewer.ID, "messages": messages})

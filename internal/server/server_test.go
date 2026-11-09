@@ -17,6 +17,7 @@ import (
 	"github.com/gosuda/AutoIRC2P/internal/auth"
 	"github.com/gosuda/AutoIRC2P/internal/irc"
 	"github.com/gosuda/AutoIRC2P/internal/store"
+	"github.com/gosuda/AutoIRC2P/internal/translate"
 )
 
 type recordingBridge struct{ sent chan string }
@@ -376,3 +377,258 @@ func TestAuthenticationRejectsEmailCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryReturnsCachedTranslationsImmediatelyWithoutEnqueuing(t *testing.T) {
+	app, _, _ := lifecycleServer(t, &lifecycleBridge{state: irc.RoomReady})
+	var calls atomic.Int64
+	app.translator = translationFunc(func(context.Context, string, string) (string, error) {
+		calls.Add(1)
+		return "uncached provider result", nil
+	})
+	original := "안녕하세요 여러분."
+	key, ok := translate.CacheKey(original, "en")
+	if !ok {
+		t.Fatal("expected valid translation cache key")
+	}
+	if err := app.q.PutTranslation(t.Context(), key, "Hello everyone from cache."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.q.AddMessage(t.Context(), store.AddMessageParams{Room: "#one", Nick: "bob", Original: original, CreatedAt: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	app.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/messages?room=%23one&lang=en", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("history status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var history struct {
+		Messages []Message `json:"messages"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Messages) != 1 {
+		t.Fatalf("history messages = %d, want 1", len(history.Messages))
+	}
+	got := history.Messages[0]
+	if got.TranslationState != "ready" || got.Translation != "Hello everyone from cache." {
+		t.Fatalf("cached history message = %+v, want ready cached translation", got)
+	}
+	if len(app.jobs) != 0 || calls.Load() != 0 {
+		t.Fatalf("cached history enqueued %d jobs and called translator %d times", len(app.jobs), calls.Load())
+	}
+}
+
+type recordingPrewarmBridge struct {
+	*lifecycleBridge
+	prewarmed chan irc.Account
+}
+
+func (b *recordingPrewarmBridge) Prewarm(_ context.Context, account irc.Account) error {
+	cloned := account
+	cloned.Identity.Keys = append([]byte(nil), account.Identity.Keys...)
+	cloned.Alternates = make([]irc.Identity, len(account.Alternates))
+	for i, alt := range account.Alternates {
+		cloned.Alternates[i] = irc.Identity{
+			Address: alt.Address,
+			Keys:    append([]byte(nil), alt.Keys...),
+		}
+	}
+	b.prewarmed <- cloned
+	return nil
+}
+
+func TestAuthenticationAndSessionRestorePrewarmAccount(t *testing.T) {
+	bridge := &recordingPrewarmBridge{
+		lifecycleBridge: &lifecycleBridge{state: irc.RoomPreparing},
+		prewarmed:       make(chan irc.Account, 8),
+	}
+	app, _, _ := lifecycleServer(t, bridge)
+	handler := app.Handler()
+	proof := strings.Repeat("ef", 32)
+
+	registerReq := httptest.NewRequest(http.MethodPost, "https://chat.example/api/auth/register", strings.NewReader(`{"nick":"warmNick","passwordHash":"`+proof+`"}`))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerReq.Header.Set("Origin", "https://chat.example")
+	registerResp := httptest.NewRecorder()
+	handler.ServeHTTP(registerResp, registerReq)
+	if registerResp.Code != http.StatusOK {
+		t.Fatalf("register status = %d: %s", registerResp.Code, registerResp.Body.String())
+	}
+	select {
+	case account := <-bridge.prewarmed:
+		if account.Nick != "warmNick" || len(account.Identity.Keys) == 0 || len(account.Alternates) != irc.DestinationPoolSize-1 {
+			t.Fatalf("register prewarm account = %+v", account)
+		}
+	default:
+		t.Fatal("register did not prewarm account")
+	}
+
+	loginReq := httptest.NewRequest(http.MethodPost, "https://chat.example/api/auth/login", strings.NewReader(`{"nick":"warmNick","passwordHash":"`+proof+`"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginReq.Header.Set("Origin", "https://chat.example")
+	loginResp := httptest.NewRecorder()
+	handler.ServeHTTP(loginResp, loginReq)
+	if loginResp.Code != http.StatusOK {
+		t.Fatalf("login status = %d: %s", loginResp.Code, loginResp.Body.String())
+	}
+	select {
+	case account := <-bridge.prewarmed:
+		if account.Nick != "warmNick" || len(account.Alternates) != irc.DestinationPoolSize-1 {
+			t.Fatalf("login prewarm account = %+v", account)
+		}
+	default:
+		t.Fatal("login did not prewarm account")
+	}
+
+	sessionReq := httptest.NewRequest(http.MethodGet, "https://chat.example/api/session", nil)
+	for _, cookie := range (&http.Response{Header: loginResp.Header()}).Cookies() {
+		sessionReq.AddCookie(cookie)
+	}
+	sessionResp := httptest.NewRecorder()
+	handler.ServeHTTP(sessionResp, sessionReq)
+	if sessionResp.Code != http.StatusOK {
+		t.Fatalf("session status = %d: %s", sessionResp.Code, sessionResp.Body.String())
+	}
+	select {
+	case account := <-bridge.prewarmed:
+		if account.Nick != "warmNick" || len(account.Alternates) != irc.DestinationPoolSize-1 {
+			t.Fatalf("session prewarm account = %+v", account)
+		}
+	default:
+		t.Fatal("session restore did not prewarm account")
+	}
+}
+
+func TestWebSocketSubscribeSwitchesRoomAndLanguageWithoutReconnecting(t *testing.T) {
+	var acquires, releases atomic.Int64
+	bridge := &leaseBridge{
+		lifecycleBridge: &lifecycleBridge{state: irc.RoomReady},
+		acquire: func(context.Context, irc.Account) (func(), error) {
+			acquires.Add(1)
+			return func() { releases.Add(1) }, nil
+		},
+	}
+	app, _, token := lifecycleServer(t, bridge)
+	app.translator = translationFunc(func(_ context.Context, text, target string) (string, error) {
+		return "[" + target + "] " + text, nil
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); app.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	server := httptest.NewServer(app.Handler())
+	t.Cleanup(server.Close)
+
+	header := http.Header{
+		"Origin": {"https://chat.example"},
+		"Cookie": {"session=" + token},
+	}
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/ws?room=%23one&lang=en", header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		var bootstrap frame
+		if err := conn.ReadJSON(&bootstrap); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := range 17 {
+		room := "#one"
+		lang := "en"
+		if i%2 == 0 {
+			room = "#two"
+			lang = "ko"
+		}
+		if err := conn.WriteJSON(map[string]any{"type": "subscribe", "room": room, "lang": lang}); err != nil {
+			t.Fatalf("subscribe switch %d failed: %v", i, err)
+		}
+	}
+
+	if err := conn.WriteJSON(map[string]any{"type": "read", "room": "#two", "messageId": 0}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		var event frame
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "room" && event.Room != nil && event.Room.Name == "#two" {
+			break
+		}
+	}
+
+	app.Event(ctx, irc.Event{Kind: "message", Room: "#two", Nick: "bob", Text: "switched room message"})
+	var gotMessage, gotTranslation bool
+	for !gotMessage || !gotTranslation {
+		var event frame
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatal(err)
+		}
+		switch event.Type {
+		case "message":
+			if event.Message == nil || event.Message.Room != "#two" || event.Message.TargetLanguage != "ko" {
+				t.Fatalf("unexpected message frame after subscribe switch: %+v", event.Message)
+			}
+			gotMessage = true
+		case "translation":
+			if event.Message == nil || event.Message.Translation != "[ko] switched room message" {
+				t.Fatalf("unexpected translation frame after subscribe switch: %+v", event.Message)
+			}
+			gotTranslation = true
+		}
+	}
+	if acquires.Load() != 1 || releases.Load() != 0 {
+		t.Fatalf("account lease acquires=%d releases=%d, want 1 and 0", acquires.Load(), releases.Load())
+	}
+}
+
+func BenchmarkReceiveAndBroadcastAcrossSubscribers(b *testing.B) {
+	ctx := b.Context()
+	db, q, err := store.NewSQLite(ctx, filepath.Join(b.TempDir(), "bench.sqlite"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	a, err := auth.New(q, bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		b.Fatal(err)
+	}
+	app := New(Config{Rooms: []string{"#one", "#two"}}, q, a, nil, &lifecycleBridge{state: irc.RoomReady})
+	defer app.cancel()
+
+	subs := make([]*subscription, 32)
+	for i := range subs {
+		sub := &subscription{
+			userID:  0,
+			room:    "#one",
+			lang:    "original",
+			out:     make(chan frame, 1024),
+			done:    make(chan struct{}),
+			cursors: map[string]int64{"#one": 0, "#two": 0},
+		}
+		subs[i] = sub
+		app.subscribers[sub] = struct{}{}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		app.receive(ctx, irc.Event{Kind: "message", Room: "#one", Nick: "bob", Text: "live broadcast benchmark"})
+		for _, sub := range subs {
+			for len(sub.out) > 0 {
+				<-sub.out
+			}
+		}
+		_ = i
+	}
+}
+

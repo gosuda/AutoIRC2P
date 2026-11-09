@@ -49,10 +49,7 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 		}
 		state.guestNick = sessionNick
 	}
-	if err := conn.write(state.ctx, "NICK "+sessionNick); err != nil {
-		return err
-	}
-	if err := conn.write(state.ctx, "USER "+sessionNick+" 0 * :HexChat"); err != nil {
+	if err := conn.writeLines(state.ctx, "NICK "+sessionNick, "USER "+sessionNick+" 0 * :HexChat"); err != nil {
 		return err
 	}
 

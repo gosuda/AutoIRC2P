@@ -55,9 +55,7 @@ func openRouterRuntime(stateDir string, destinationCapacity int) (*routerRuntime
 			return nil, fmt.Errorf("open I2P addressbook: %w", err)
 		}
 	}
-	if addressBook != nil {
-		cfg.Resolver = newAddressBookResolver(addressBook)
-	}
+	cfg.Resolver = newAddressBookResolver(addressBook)
 	runtime := &routerRuntime{addressBook: addressBook}
 	runtime.open = func(ctx context.Context) (routerNode, error) {
 		router, err := ivnp.NewRouter(ctx, cfg)

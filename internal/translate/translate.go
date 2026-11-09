@@ -149,15 +149,22 @@ func allowedTransport(u *url.URL) bool {
 	return false
 }
 
+func CacheKey(text, target string) (string, bool) {
+	if _, ok := languageNames[target]; !ok || strings.TrimSpace(text) == "" || len(text) > 16384 || !utf8.ValidString(text) || strings.ContainsAny(text, "\x00\x01") {
+		return "", false
+	}
+	digest := sha256.Sum256([]byte(promptVersion + "\x00" + target + "\x00" + text))
+	return hex.EncodeToString(digest[:]), true
+}
+
 func (t *Translator) Translate(ctx context.Context, text, target string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if _, ok := languageNames[target]; !ok || strings.TrimSpace(text) == "" || len(text) > 16384 || !utf8.ValidString(text) || strings.ContainsAny(text, "\x00\x01") {
+	key, ok := CacheKey(text, target)
+	if !ok {
 		return "", ErrInput
 	}
-	digest := sha256.Sum256([]byte(promptVersion + "\x00" + target + "\x00" + text))
-	key := hex.EncodeToString(digest[:])
 	t.mu.Lock()
 	now := time.Now()
 	if f, ok := t.failed[key]; ok && now.Before(f.until) {

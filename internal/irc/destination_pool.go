@@ -33,7 +33,6 @@ func restoreDestinations(account Account, first int) ([]destinationSlot, error) 
 }
 
 func (m *Manager) createAccountDestination(state *accountConnection, slot *destinationSlot) error {
-	m.status(state.account.ID, "connecting", "Creating I2P destination")
 	ctx, cancel := context.WithTimeout(state.ctx, 5*time.Minute)
 	defer cancel()
 	endpoint, err := m.createDestination(ctx, ivnp.DestinationConfig{Identity: slot.local})

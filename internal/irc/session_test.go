@@ -493,3 +493,43 @@ func TestRegistrationAnswersBoundedCTCPChallenges(t *testing.T) {
 		}
 	})
 }
+
+type countingWriteConn struct {
+	net.Conn
+	writes int
+}
+
+func (c *countingWriteConn) Write(p []byte) (int, error) {
+	c.writes++
+	return c.Conn.Write(p)
+}
+
+func TestRegistrationCoalescesNickAndUserIntoSingleWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	client, server := net.Pipe()
+	defer func() {
+		cancel()
+		_ = server.Close()
+	}()
+	if err := server.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	counted := &countingWriteConn{Conn: client}
+	manager := &Manager{ctx: ctx, onEvent: func(Event) {}}
+	state := &accountConnection{ctx: ctx, account: Account{ID: 1, Nick: "alice"}, joined: make(map[string]bool)}
+	done := make(chan error, 1)
+	go func() { done <- manager.serveConnection(state, &wireConnection{Conn: counted}) }()
+	reader := bufio.NewReader(server)
+	if line, err := reader.ReadString('\n'); err != nil || line != "NICK alice\r\n" {
+		t.Fatalf("NICK line = %q, %v", line, err)
+	}
+	if line, err := reader.ReadString('\n'); err != nil || line != "USER alice 0 * :HexChat\r\n" {
+		t.Fatalf("USER line = %q, %v", line, err)
+	}
+	if counted.writes != 1 {
+		t.Fatalf("registration Write calls = %d, want 1 coalesced write", counted.writes)
+	}
+	cancel()
+	_ = server.Close()
+	<-done
+}

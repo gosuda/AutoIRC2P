@@ -49,11 +49,29 @@ func TestPrewarmTransfersReadyPrimaryWithoutOpeningIRC(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		attempts := make(chan recoveryAttempt, 1)
 		created := make(chan *warmupEndpoint, DestinationPoolSize)
+		alternateGate := make(chan struct{})
 		manager := leaseManager(t, 1, func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
+			if spec.Identity.B32() != account.Identity.Address {
+				<-alternateGate
+			}
 			endpoint := newWarmupEndpoint(spec, attempts)
 			created <- endpoint
 			return endpoint, nil
 		})
+		var mu sync.Mutex
+		var latestState string
+		var regressed bool
+		manager.onEvent = func(event Event) {
+			if event.Kind != "status" || event.AccountID != account.ID {
+				return
+			}
+			mu.Lock()
+			if latestState == "connected" && event.State == "connecting" {
+				regressed = true
+			}
+			latestState = event.State
+			mu.Unlock()
+		}
 		caller := Account{ID: account.ID, Identity: Identity{Address: account.Identity.Address, Keys: bytes.Clone(account.Identity.Keys)}}
 		if err := manager.Prewarm(t.Context(), caller); err != nil {
 			t.Fatal(err)
@@ -79,12 +97,22 @@ func TestPrewarmTransfersReadyPrimaryWithoutOpeningIRC(t *testing.T) {
 		if attempt.endpoint != primary.recoveryEndpoint {
 			t.Fatal("login dialed a different destination instead of the warmed primary")
 		}
+		joinRecoveryRoom(t, manager, attempt, account)
+		close(alternateGate)
 		endpoints := []*warmupEndpoint{primary}
 		alternates := make(map[string]*warmupEndpoint, len(account.Alternates))
 		for range account.Alternates {
 			endpoint := <-created
 			alternates[endpoint.local.B32()] = endpoint
 			endpoints = append(endpoints, endpoint)
+		}
+		synctest.Wait()
+		mu.Lock()
+		failedRegression := regressed
+		finalState := latestState
+		mu.Unlock()
+		if failedRegression || finalState != "connected" {
+			t.Fatalf("background alternate creation regressed status: regressed=%v final=%q", failedRegression, finalState)
 		}
 		for _, identity := range account.Alternates {
 			if alternates[identity.Address] == nil {

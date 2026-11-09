@@ -459,6 +459,7 @@ func (m *Manager) runAccount(state *accountConnection) {
 	selected := 0
 	for state.ctx.Err() == nil {
 		if done := initial[selected]; done != nil {
+			m.status(state.account.ID, "connecting", "Creating I2P destination")
 			select {
 			case <-state.ctx.Done():
 				return
@@ -471,6 +472,7 @@ func (m *Manager) runAccount(state *accountConnection) {
 		slot.creationErr = nil
 		stage := "destination creation"
 		if slot.endpoint == nil && err == nil {
+			m.status(state.account.ID, "connecting", "Creating I2P destination")
 			err = m.createAccountDestination(state, slot)
 		}
 		// Renewal can reset publication readiness while existing tunnels remain usable.
@@ -604,6 +606,21 @@ func (c *wireConnection) write(ctx context.Context, line string) error {
 	return c.writeWithTimeout(ctx, line, 20*time.Second)
 }
 
+func (c *wireConnection) writeLines(ctx context.Context, lines ...string) error {
+	var raw strings.Builder
+	for _, line := range lines {
+		if strings.ContainsAny(line, "\r\n\x00") {
+			return ErrInvalidMessage
+		}
+		if len(line)+2 > 512 {
+			return ErrLineTooLong
+		}
+		raw.WriteString(line)
+		raw.WriteString("\r\n")
+	}
+	return c.writePayloadWithTimeout(ctx, raw.String(), 20*time.Second)
+}
+
 func (c *wireConnection) writeWithTimeout(ctx context.Context, line string, timeout time.Duration) error {
 	if strings.ContainsAny(line, "\r\n\x00") {
 		return ErrInvalidMessage
@@ -611,6 +628,10 @@ func (c *wireConnection) writeWithTimeout(ctx context.Context, line string, time
 	if len(line)+2 > 512 {
 		return ErrLineTooLong
 	}
+	return c.writePayloadWithTimeout(ctx, line+"\r\n", timeout)
+}
+
+func (c *wireConnection) writePayloadWithTimeout(ctx context.Context, payload string, timeout time.Duration) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -625,8 +646,8 @@ func (c *wireConnection) writeWithTimeout(ctx context.Context, line string, time
 	}
 	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
 	defer stop()
-	n, err := io.WriteString(c.Conn, line+"\r\n")
-	if err == nil && n != len(line)+2 {
+	n, err := io.WriteString(c.Conn, payload)
+	if err == nil && n != len(payload) {
 		err = io.ErrShortWrite
 	}
 	if err != nil {
