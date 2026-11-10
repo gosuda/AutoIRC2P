@@ -20,6 +20,46 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
+      - name: Check https://irc2p.gosunuts.xyz/ deployment
+        run: |
+          echo "=== /api/health ==="
+          curl -i -sS --max-time 20 https://irc2p.gosunuts.xyz/api/health || true
+          echo ""
+          echo "=== / (index.html) ==="
+          curl -sS --max-time 20 https://irc2p.gosunuts.xyz/ | head -n 30 || true
+          echo ""
+          echo "=== /api/rooms ==="
+          curl -sS --max-time 20 https://irc2p.gosunuts.xyz/api/rooms | head -c 2000 || true
+          echo ""
+          echo "=== /api/messages?room=%23i2p-chat&lang=ko ==="
+          curl -sS --max-time 20 "https://irc2p.gosunuts.xyz/api/messages?room=%23i2p-chat&lang=ko" | tail -c 2000 || true
+          echo ""
+          python3 - <<'PY'
+          import asyncio, json, ssl, urllib.request
+          import subprocess, sys
+          subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "websockets"])
+          import websockets
+
+          async def main():
+              uri = "wss://irc2p.gosunuts.xyz/api/ws?room=%23i2p-chat&lang=ko"
+              async with websockets.connect(uri, origin="https://irc2p.gosunuts.xyz", open_timeout=20) as ws:
+                  for i in range(6):
+                      try:
+                          msg = await asyncio.wait_for(ws.recv(), timeout=8)
+                          data = json.loads(msg)
+                          if data.get("type") == "rooms":
+                              rooms = data.get("rooms", [])
+                              ready = [r["name"] for r in rooms if r.get("state") == "ready"]
+                              joining = [r["name"] for r in rooms if r.get("state") == "joining"]
+                              print(f"WS frame[{i}]: type=rooms total={len(rooms)} ready={len(ready)} ({ready[:5]}) joining={len(joining)}")
+                          else:
+                              print(f"WS frame[{i}]: {msg[:500]}")
+                      except asyncio.TimeoutError:
+                          print(f"WS recv timeout at frame {i}")
+                          break
+
+          asyncio.run(main())
+          PY
       - name: Run unit tests
         run: go test -race ./...
       - name: Connect to irc.postman.i2p:6667 over live I2P
