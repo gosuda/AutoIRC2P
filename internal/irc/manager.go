@@ -499,15 +499,21 @@ func (m *Manager) runAccount(state *accountConnection) {
 		if state.ctx.Err() != nil {
 			return
 		}
+		destinationAddress := state.account.identityAt(selected).Address
+		if slot.local != nil {
+			destinationAddress = slot.local.B32()
+		}
 		closedEndpoint := errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
 		staleRoute := errors.Is(err, dataplane.TunnelErrCircuitNotFound) || errors.Is(err, dataplane.TunnelErrCircuitExpired)
 		replaceEndpoint := staleRoute || (stage != "IRC session" && closedEndpoint)
-		if replaceEndpoint {
+		if state.account.ID == 0 && state.account.Password == "" && isObserverDestinationBanned(stage, err) {
+			m.rotateObserverDestination(state, slot)
+		} else if replaceEndpoint {
 			m.closeAccountDestination(state, slot)
 		}
 		event := log.Warn().Int64("account_id", state.account.ID)
 		event.Str("server", m.cfg.Server).Str("stage", stage).Int("destination_slot", selected)
-		event.Str("destination", state.account.identityAt(selected).Address)
+		event.Str("destination", destinationAddress)
 		event.Err(err).Dur("retry_in_ms", reconnectDelay)
 		event.Msg("IRC connection attempt failed")
 		m.onEvent(Event{AccountID: state.account.ID, State: "disconnected", Text: fmt.Sprintf("IRC connection failed during %s: %v; retrying in %s without replaying messages", stage, err, reconnectDelay), Service: true, Kind: "status"})

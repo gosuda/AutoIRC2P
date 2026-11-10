@@ -3,6 +3,7 @@ package irc
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -52,4 +53,33 @@ func (m *Manager) closeAccountDestination(state *accountConnection, slot *destin
 		slot.endpoint = nil
 	}
 	slot.ready = false
+}
+
+func (m *Manager) rotateObserverDestination(state *accountConnection, slot *destinationSlot) {
+	m.closeAccountDestination(state, slot)
+	local, err := foundation.GenerateLegacyLocalDestination()
+	if err != nil {
+		return
+	}
+	if slot.local != nil {
+		slot.local.ReleaseSensitive()
+	}
+	slot.local = local
+}
+
+func isObserverDestinationBanned(stage string, err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	if stage == "IRC dial" {
+		return strings.Contains(text, "peer reset the connection")
+	}
+	if stage == "IRC session" {
+		return strings.Contains(text, "permanently banned") ||
+			strings.Contains(text, "k-lined") ||
+			strings.Contains(text, "g-lined") ||
+			strings.Contains(text, "z-lined")
+	}
+	return false
 }

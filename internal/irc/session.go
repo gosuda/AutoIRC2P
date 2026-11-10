@@ -129,6 +129,8 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 				continue
 			case "432", "433", "436":
 				return m.serverRefusal(state, msg, errNickUnavailable)
+			case "465":
+				return m.serverRefusal(state, msg, net.ErrClosed)
 			case "001":
 				if welcome || len(msg.params) < 1 || !matchesWelcomeNick(sessionNick, msg.params[0]) {
 					continue

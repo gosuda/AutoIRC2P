@@ -699,3 +699,37 @@ func (e *countingRecoveryEndpoint) DialContext(ctx context.Context, network, add
 	return e.recoveryEndpoint.DialContext(ctx, network, address)
 }
 
+func TestObserverRotatesBannedDestinationIdentity(t *testing.T) {
+	observer := leaseAccount(t, 0, "observer")
+	observer.Password = ""
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		first := receiveRecoveryAttempt(t, attempts, observer)
+		writeRecoveryLine(t, first, ":irc.example.i2p 465 "+first.nick+" :You are permanently banned")
+		synctest.Wait()
+		<-time.After(time.Second)
+		synctest.Wait()
+		var second recoveryAttempt
+		select {
+		case second = <-attempts:
+		case <-time.After(time.Minute):
+			t.Fatal("IRC attempt did not retry after ban")
+		}
+		if second.address == first.address {
+			t.Fatalf("banned observer reused destination %q", second.address)
+		}
+		if second.signingErr != nil {
+			t.Fatalf("rotated observer destination signing error = %v", second.signingErr)
+		}
+		if err := second.peer.SetDeadline(time.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		second.nick = readSessionNick(t, second.reader)
+		readRecoveryLine(t, second, "USER "+second.nick+" 0 * :"+second.nick+"\r\n")
+		joinRecoveryRoom(t, manager, second, observer)
+	})
+}
+

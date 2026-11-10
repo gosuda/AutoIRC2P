@@ -2,12 +2,49 @@ package irc
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
+
+func TestLiveGosunutsDeployment(t *testing.T) {
+	if os.Getenv("AUTOIRC2P_LIVE_IRC") != "1" {
+		t.Skip("set AUTOIRC2P_LIVE_IRC=1 to run the live deployment check")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	headers := http.Header{"Origin": []string{"https://irc2p.gosunuts.xyz"}}
+	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
+	conn, resp, err := dialer.DialContext(ctx, "wss://irc2p.gosunuts.xyz/api/ws?room=%23i2p-chat&lang=ko", headers)
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+	if err != nil {
+		t.Logf("wss://irc2p.gosunuts.xyz/api/ws dial error: %v", err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	for i := range 6 {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, raw, readErr := conn.ReadMessage()
+		if readErr != nil {
+			t.Logf("WS frame[%d] read ended: %v", i, readErr)
+			break
+		}
+		if len(raw) > 1200 {
+			raw = raw[:1200]
+		}
+		t.Logf("WS frame[%d]: %s", i, string(raw))
+	}
+}
 
 func TestLiveIRCPostmanConnection(t *testing.T) {
 	if os.Getenv("AUTOIRC2P_LIVE_IRC") != "1" {
