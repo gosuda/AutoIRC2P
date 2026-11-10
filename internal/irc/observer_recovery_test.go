@@ -139,13 +139,13 @@ func receiveRecoveryAttempt(t *testing.T, attempts <-chan recoveryAttempt, accou
 	}
 	attempt.nick = readSessionNick(t, attempt.reader)
 	if account.ID == 0 && account.Password == "" {
-		if matched, err := regexp.MatchString(`^Irc2PGuest[0-9]{5}$`, attempt.nick); err != nil || !matched {
-			t.Fatalf("guest nickname = %q, want Irc2PGuest and five digits: %v", attempt.nick, err)
+		if matched, err := regexp.MatchString(`^[a-z]{10}$`, attempt.nick); err != nil || !matched {
+			t.Fatalf("guest nickname = %q, want ten lowercase ASCII letters: %v", attempt.nick, err)
 		}
 	} else if attempt.nick != account.Nick {
 		t.Fatalf("authenticated nickname = %q, want %q", attempt.nick, account.Nick)
 	}
-	readRecoveryLine(t, attempt, "USER "+attempt.nick+" 0 * :HexChat\r\n")
+	readRecoveryLine(t, attempt, "USER "+attempt.nick+" 0 * :"+attempt.nick+"\r\n")
 	return attempt
 }
 

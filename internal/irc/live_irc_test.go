@@ -32,7 +32,7 @@ func TestLiveIRCPostmanConnection(t *testing.T) {
 
 	observer := Account{
 		ID:         0,
-		Nick:       "Irc2PGuest",
+		Nick:       "observer",
 		Identity:   primary,
 		Alternates: []Identity{alt0, alt1},
 	}

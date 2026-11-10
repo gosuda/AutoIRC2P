@@ -21,6 +21,21 @@ const (
 	keepaliveInterval   = 30 * time.Second
 )
 
+var (
+	guestOnsets = [...]string{"b", "c", "d", "f", "g", "h", "j", "k", "l", "m", "n", "p", "r", "s", "t", "v", "w", "z"}
+	guestVowels = [...]string{"a", "e", "i", "o", "u"}
+)
+
+func randomGuestNick() string {
+	var b strings.Builder
+	b.Grow(10)
+	for range 5 {
+		b.WriteString(guestOnsets[rand.IntN(len(guestOnsets))])
+		b.WriteString(guestVowels[rand.IntN(len(guestVowels))])
+	}
+	return b.String()
+}
+
 func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection) (result error) {
 	joinCtx, cancelJoins := context.WithCancel(state.ctx)
 	var joins sync.WaitGroup
@@ -42,14 +57,14 @@ func (m *Manager) serveConnection(state *accountConnection, conn *wireConnection
 	sessionNick := state.account.Nick
 	if state.account.ID == 0 && state.account.Password == "" {
 		for {
-			sessionNick = fmt.Sprintf("Irc2PGuest%05d", rand.IntN(100000))
+			sessionNick = randomGuestNick()
 			if sessionNick != state.guestNick {
 				break
 			}
 		}
 		state.guestNick = sessionNick
 	}
-	if err := conn.writeLines(state.ctx, "NICK "+sessionNick, "USER "+sessionNick+" 0 * :HexChat"); err != nil {
+	if err := conn.writeLines(state.ctx, "NICK "+sessionNick, "USER "+sessionNick+" 0 * :"+sessionNick); err != nil {
 		return err
 	}
 

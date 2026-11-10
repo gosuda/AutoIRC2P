@@ -49,7 +49,7 @@ func TestObserverReceivesAuthenticatedAccountsWithoutSendingChannelMessages(t *t
 	})
 	reader := bufio.NewReader(server)
 	nick := readSessionNick(t, reader)
-	if line, err := reader.ReadString('\n'); err != nil || line != "USER "+nick+" 0 * :HexChat\r\n" {
+	if line, err := reader.ReadString('\n'); err != nil || line != "USER "+nick+" 0 * :"+nick+"\r\n" {
 		t.Fatalf("IRC user registration = %q, %v", line, err)
 	}
 	if _, err := io.WriteString(server, ":irc.example.i2p 001 "+nick+" :Welcome\r\n"); err != nil {
@@ -340,7 +340,7 @@ func TestNickServTimeoutPreservesPartialIRCFrame(t *testing.T) {
 					}
 				}
 				readLine("NICK alice\r\n")
-				readLine("USER alice 0 * :HexChat\r\n")
+				readLine("USER alice 0 * :alice\r\n")
 				write(":irc.example.i2p 001 alice :Welcome\r\n")
 				readLine("WHOIS NickServ\r\n")
 				write(tc.prefix)
@@ -463,14 +463,14 @@ func TestRegistrationAnswersBoundedCTCPChallenges(t *testing.T) {
 		}, "\r\n"))
 		readLine("PONG :before-challenge")
 		writeLine(":checker!user@host PRIVMSG ALICE :\x01VERSION\x01")
-		readLine("NOTICE checker :\x01VERSION HexChat 2.16.2\x01")
+		readLine("NOTICE checker :\x01VERSION irssi v1.4.5\x01")
 		writeLine(":checker!user@host PRIVMSG alice :\x01pInG opaque  :token ")
 		readLine("NOTICE checker :\x01pInG opaque  :token \x01")
 		writeLine(":checker!user@host PRIVMSG alice :\x01VERSION\x01\r\n:checker!user@host PRIVMSG alice :\x01PING repeat\x01\r\nPING :rate-limit")
 		readLine("PONG :rate-limit")
 		<-time.After(10 * time.Second)
 		writeLine(":checker!user@host PRIVMSG alice :\x01vErSiOn")
-		readLine("NOTICE checker :\x01VERSION HexChat 2.16.2\x01")
+		readLine("NOTICE checker :\x01VERSION irssi v1.4.5\x01")
 		writeLine(":checker!user@host PRIVMSG alice :\x01PING after-limit\x01")
 		readLine("NOTICE checker :\x01PING after-limit\x01")
 		writeLine(":irc.example.i2p 001 alice :Welcome")
@@ -523,7 +523,7 @@ func TestRegistrationCoalescesNickAndUserIntoSingleWrite(t *testing.T) {
 	if line, err := reader.ReadString('\n'); err != nil || line != "NICK alice\r\n" {
 		t.Fatalf("NICK line = %q, %v", line, err)
 	}
-	if line, err := reader.ReadString('\n'); err != nil || line != "USER alice 0 * :HexChat\r\n" {
+	if line, err := reader.ReadString('\n'); err != nil || line != "USER alice 0 * :alice\r\n" {
 		t.Fatalf("USER line = %q, %v", line, err)
 	}
 	if counted.writes != 1 {

@@ -126,7 +126,7 @@ func (r *ctcpResponder) accept(msg frame, nick string, now time.Time) string {
 	var lastReply *time.Time
 	switch {
 	case strings.EqualFold(command, "VERSION") && !hasParams:
-		payload = "VERSION HexChat 2.16.2"
+		payload = "VERSION irssi v1.4.5"
 		lastReply = &r.lastVersion
 	case strings.EqualFold(command, "PING") && hasParams && params != "":
 		lastReply = &r.lastPing
