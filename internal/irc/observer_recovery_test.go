@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"regexp"
 	"sync"
 	"testing"
@@ -650,3 +651,51 @@ func TestPoolCreationFailureDoesNotDiscardHealthyDestinations(t *testing.T) {
 		}
 	})
 }
+
+func TestDialRetriesSameDestinationOnHandshakeTimeoutBeforeRotating(t *testing.T) {
+	observer := pooledLeaseAccount(t, 0, "observer")
+	synctest.Test(t, func(t *testing.T) {
+		manager, attempts, _ := newRecoveryManager(t)
+		var primaryDialCount int
+		manager.createDestination = func(_ context.Context, spec ivnp.DestinationConfig) (destinationEndpoint, error) {
+			endpoint := &recoveryEndpoint{local: spec.Identity, attempts: attempts, closed: make(chan struct{})}
+			if spec.Identity.B32() == observer.Identity.Address {
+				endpoint.dialFailure = os.ErrDeadlineExceeded
+			}
+			return &countingRecoveryEndpoint{
+				recoveryEndpoint: endpoint,
+				onDial: func(e *recoveryEndpoint) {
+					if e.local.B32() == observer.Identity.Address {
+						primaryDialCount++
+						if primaryDialCount == 2 {
+							e.mu.Lock()
+							e.dialFailure = nil
+							e.mu.Unlock()
+						}
+					}
+				},
+			}, nil
+		}
+		if err := manager.ConnectObserver(t.Context(), observer); err != nil {
+			t.Fatal(err)
+		}
+		attempt := receiveRecoveryAttempt(t, attempts, observer)
+		if primaryDialCount != 2 {
+			t.Fatalf("primary dial count = %d, want 2 same-slot attempts", primaryDialCount)
+		}
+		joinRecoveryRoom(t, manager, attempt, observer)
+	})
+}
+
+type countingRecoveryEndpoint struct {
+	*recoveryEndpoint
+	onDial func(*recoveryEndpoint)
+}
+
+func (e *countingRecoveryEndpoint) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if e.onDial != nil {
+		e.onDial(e.recoveryEndpoint)
+	}
+	return e.recoveryEndpoint.DialContext(ctx, network, address)
+}
+

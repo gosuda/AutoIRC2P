@@ -1,0 +1,28 @@
+name: Live IRC over I2P
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-irc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: Run unit tests
+        run: go test -race ./...
+      - name: Connect to irc.postman.i2p:6667 over live I2P
+        env:
+          AUTOIRC2P_LIVE_IRC: '1'
+        run: go test -v -timeout=14m -run '^TestLiveIRCPostmanConnection$' ./internal/irc

@@ -2,8 +2,10 @@ package irc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -87,10 +89,19 @@ func newAddressBook(stateDir string) (*client.AddressBookService, error) {
 	})
 }
 
+const maxSameSlotDialTimeouts = 3
+
 func (m *Manager) dialIRC(ctx context.Context, endpoint destinationEndpoint) (net.Conn, error) {
-	conn, err := endpoint.DialContext(ctx, "i2p", m.cfg.Server)
-	if err != nil {
-		return nil, fmt.Errorf("dial IRC stream: %w", err)
+	var err error
+	for attempt := 0; attempt < maxSameSlotDialTimeouts; attempt++ {
+		var conn net.Conn
+		conn, err = endpoint.DialContext(ctx, "i2p", m.cfg.Server)
+		if err == nil {
+			return conn, nil
+		}
+		if ctx.Err() != nil || !errors.Is(err, os.ErrDeadlineExceeded) {
+			break
+		}
 	}
-	return conn, nil
+	return nil, fmt.Errorf("dial IRC stream: %w", err)
 }
