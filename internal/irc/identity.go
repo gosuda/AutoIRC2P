@@ -55,6 +55,32 @@ func (a *Account) ReleaseSensitive() {
 	a.Password = ""
 }
 
+// RefreshIdentityPool replaces the account's primary and alternate I2P destinations with freshly generated identities.
+func (a *Account) RefreshIdentityPool() error {
+	primary, err := GenerateIdentity()
+	if err != nil {
+		return err
+	}
+	alternates := make([]Identity, len(a.Alternates))
+	for i := range alternates {
+		alternates[i], err = GenerateIdentity()
+		if err != nil {
+			clear(primary.Keys)
+			for j := range i {
+				clear(alternates[j].Keys)
+			}
+			return err
+		}
+	}
+	clear(a.Identity.Keys)
+	for i := range a.Alternates {
+		clear(a.Alternates[i].Keys)
+	}
+	a.Identity = primary
+	a.Alternates = alternates
+	return nil
+}
+
 func (a Account) identityAt(index int) Identity {
 	if index == 0 {
 		return a.Identity

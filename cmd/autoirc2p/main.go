@@ -118,6 +118,11 @@ func run() (err error) {
 		if cfg.ObserverNick != "" {
 			observer.Nick = cfg.ObserverNick
 			observer.Password = cfg.ObserverPassword
+		} else if cfg.ObserverPassword == "" {
+			if err = observer.RefreshIdentityPool(); err != nil {
+				observer.ReleaseSensitive()
+				return err
+			}
 		}
 		err = bridge.ConnectObserver(ctx, observer)
 		observer.ReleaseSensitive()

@@ -89,7 +89,7 @@ func newAddressBook(stateDir string) (*client.AddressBookService, error) {
 	})
 }
 
-const maxSameSlotDialTimeouts = 3
+const maxSameSlotDialTimeouts = 2
 
 func (m *Manager) dialIRC(ctx context.Context, endpoint destinationEndpoint) (net.Conn, error) {
 	var err error

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -505,7 +506,8 @@ func (m *Manager) runAccount(state *accountConnection) {
 		}
 		closedEndpoint := errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
 		staleRoute := errors.Is(err, dataplane.TunnelErrCircuitNotFound) || errors.Is(err, dataplane.TunnelErrCircuitExpired)
-		replaceEndpoint := staleRoute || (stage != "IRC session" && closedEndpoint)
+		dialTimeout := stage == "IRC dial" && (errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded))
+		replaceEndpoint := staleRoute || dialTimeout || (stage != "IRC session" && closedEndpoint)
 		if state.account.ID == 0 && state.account.Password == "" && isObserverDestinationBanned(stage, err) {
 			m.rotateObserverDestination(state, slot)
 		} else if replaceEndpoint {

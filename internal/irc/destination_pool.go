@@ -2,7 +2,9 @@ package irc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -73,7 +75,9 @@ func isObserverDestinationBanned(stage string, err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	if stage == "IRC dial" {
-		return strings.Contains(text, "peer reset the connection")
+		return strings.Contains(text, "peer reset the connection") ||
+			errors.Is(err, os.ErrDeadlineExceeded) ||
+			errors.Is(err, context.DeadlineExceeded)
 	}
 	if stage == "IRC session" {
 		return strings.Contains(text, "permanently banned") ||

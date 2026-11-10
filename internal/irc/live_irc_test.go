@@ -2,6 +2,7 @@ package irc
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,32 +18,64 @@ func TestLiveGosunutsDeployment(t *testing.T) {
 		t.Skip("set AUTOIRC2P_LIVE_IRC=1 to run the live deployment check")
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Second)
 	defer cancel()
 
+	start := time.Now()
 	headers := http.Header{"Origin": []string{"https://irc2p.gosunuts.xyz"}}
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
-	conn, resp, err := dialer.DialContext(ctx, "wss://irc2p.gosunuts.xyz/api/ws?room=%23i2p-chat&lang=ko", headers)
-	if resp != nil && resp.Body != nil {
-		defer func() { _ = resp.Body.Close() }()
-	}
-	if err != nil {
-		t.Logf("wss://irc2p.gosunuts.xyz/api/ws dial error: %v", err)
-		return
-	}
-	defer func() { _ = conn.Close() }()
 
-	for i := range 6 {
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, raw, readErr := conn.ReadMessage()
-		if readErr != nil {
-			t.Logf("WS frame[%d] read ended: %v", i, readErr)
-			break
+	type wsFrame struct {
+		Type      string `json:"type"`
+		State     string `json:"state"`
+		ReadState string `json:"readState"`
+		Text      string `json:"text"`
+		Room      string `json:"room"`
+	}
+
+	for ctx.Err() == nil {
+		conn, resp, err := dialer.DialContext(ctx, "wss://irc2p.gosunuts.xyz/api/ws?room=%23i2p-chat&lang=ko", headers)
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
 		}
-		if len(raw) > 1200 {
-			raw = raw[:1200]
+		if err != nil {
+			t.Logf("[+%s] wss://irc2p.gosunuts.xyz/api/ws dial error: %v", time.Since(start).Round(time.Millisecond), err)
+			select {
+			case <-time.After(3 * time.Second):
+				continue
+			case <-ctx.Done():
+				return
+			}
 		}
-		t.Logf("WS frame[%d]: %s", i, string(raw))
+
+		for i := 0; ctx.Err() == nil; i++ {
+			_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
+			_, raw, readErr := conn.ReadMessage()
+			if readErr != nil {
+				t.Logf("[+%s] WS frame[%d] read ended: %v", time.Since(start).Round(time.Millisecond), i, readErr)
+				break
+			}
+			var frame wsFrame
+			_ = json.Unmarshal(raw, &frame)
+			preview := raw
+			if len(preview) > 500 {
+				preview = preview[:500]
+			}
+			t.Logf("[+%s] WS frame[%d] type=%s state=%s readState=%s text=%q raw=%s",
+				time.Since(start).Round(time.Millisecond), i, frame.Type, frame.State, frame.ReadState, frame.Text, string(preview))
+			if frame.State == "connected" && (frame.ReadState == "ready" || frame.Type == "status") {
+				if frame.ReadState == "ready" {
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+		_ = conn.Close()
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
