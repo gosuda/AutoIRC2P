@@ -3,14 +3,20 @@ name: Live IRC over I2P
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: '29 4 * * 1'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && 'unit' || 'live' }}
+  cancel-in-progress: true
+
 jobs:
   live-irc:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -23,10 +29,12 @@ jobs:
       - name: Run unit tests
         run: go test -race ./...
       - name: Connect to irc.postman.i2p:6667 over live I2P
+        if: github.event_name != 'push'
         env:
           AUTOIRC2P_LIVE_IRC: '1'
         run: go test -v -timeout=10m -run '^TestLiveIRCPostmanConnection$' ./internal/irc
       - name: Check https://irc2p.gosunuts.xyz/ deployment
+        if: github.event_name != 'push'
         env:
           AUTOIRC2P_LIVE_IRC: '1'
         run: |
