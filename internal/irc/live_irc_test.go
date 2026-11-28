@@ -44,7 +44,7 @@ func TestLiveGosunutsDeployment(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				continue
 			case <-ctx.Done():
-				return
+				t.Fatal("live gosunuts deployment did not reach WS ready state before the retry deadline")
 			}
 		}
 
@@ -74,8 +74,11 @@ func TestLiveGosunutsDeployment(t *testing.T) {
 		select {
 		case <-time.After(2 * time.Second):
 		case <-ctx.Done():
-			return
+			t.Fatal("live gosunuts deployment did not reach WS ready state before the retry deadline")
 		}
+	}
+	if ctx.Err() != nil {
+		t.Fatal("live gosunuts deployment did not reach WS ready state before the retry deadline")
 	}
 }
 
